@@ -36,5 +36,8 @@ env/
 # Converted model outputs (user-generated)
 *-tqai/
 
+# Marketing / drafts
+dev-to-article.md
+
 # Keep shipped codebook data
 !src/tqai/codebook/data/*.npz
