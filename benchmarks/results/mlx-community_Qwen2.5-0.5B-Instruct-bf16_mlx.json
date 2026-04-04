@@ -1,0 +1,55 @@
+{
+  "model": "mlx-community/Qwen2.5-0.5B-Instruct-bf16",
+  "backend": "mlx",
+  "timestamp": "2026-04-04T17:06:55",
+  "results": [
+    {
+      "config": "baseline",
+      "peak_mb": 13.43,
+      "perplexity": 4.3438,
+      "delta_ppl": 0.0,
+      "tokens_per_sec": 321.77,
+      "match_rate": 1.0
+    },
+    {
+      "config": "kv-only",
+      "peak_mb": 13.89,
+      "perplexity": 4.3438,
+      "delta_ppl": 0.0,
+      "tokens_per_sec": 33.91,
+      "match_rate": 0.04
+    },
+    {
+      "config": "kv+hidden8",
+      "peak_mb": 2.51,
+      "perplexity": 4.3438,
+      "delta_ppl": 0.0,
+      "tokens_per_sec": 33.67,
+      "match_rate": 0.04
+    },
+    {
+      "config": "all8",
+      "peak_mb": 23.35,
+      "perplexity": 4.3438,
+      "delta_ppl": 0.0,
+      "tokens_per_sec": 33.54,
+      "match_rate": 0.04
+    },
+    {
+      "config": "all6",
+      "peak_mb": 1.08,
+      "perplexity": 4.3438,
+      "delta_ppl": 0.0,
+      "tokens_per_sec": 33.68,
+      "match_rate": 0.04
+    },
+    {
+      "config": "aggressive",
+      "peak_mb": 0.28,
+      "perplexity": 4.3438,
+      "delta_ppl": 0.0,
+      "tokens_per_sec": 33.82,
+      "match_rate": 0.04
+    }
+  ]
+}

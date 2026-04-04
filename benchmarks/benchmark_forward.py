@@ -14,14 +14,27 @@ from __future__ import annotations
 
 import argparse
 import gc
-import importlib
+import importlib.util
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+_REPO_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(_REPO_ROOT / "src"))
+sys.path.insert(0, str(_REPO_ROOT))
+
+
+def _load_perp_mod():
+    """Load eval_perplexity as a module regardless of working directory."""
+    spec = importlib.util.spec_from_file_location(
+        "eval_perplexity",
+        Path(__file__).parent / "eval_perplexity.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +113,7 @@ def _run_hf_config(model, tokenizer, cfg_kwargs: dict, baseline_tokens: Optional
         cache = tqai.patch(model, backend="torch", **patch_kw)
 
     # Perplexity uses lazy import to avoid triggering hook on module name
-    perp_mod = importlib.import_module("benchmarks.eval_perplexity")
+    perp_mod = _load_perp_mod()
     ppl = perp_mod.perplexity_hf(model, tokenizer)
 
     t0 = time.perf_counter()
@@ -136,8 +149,11 @@ def _run_mlx_config(model, tokenizer, cfg_kwargs: dict, baseline_tokens: Optiona
                                  "compress_attn_logits", "bits_hidden", "bits_ffn", "bits_attn")}
         tqai.patch(model, backend="mlx", **patch_kw)
 
-    perp_mod = importlib.import_module("benchmarks.eval_perplexity")
+    perp_mod = _load_perp_mod()
     ppl = perp_mod.perplexity_mlx(model, tokenizer)
+
+    # Warmup: one generation to trigger MLX JIT compilation before timing
+    perp_mod.generate_tokens(model, tokenizer, backend="mlx", max_new_tokens=20)
 
     t0 = time.perf_counter()
     tokens = perp_mod.generate_tokens(model, tokenizer, backend="mlx", max_new_tokens=100)
