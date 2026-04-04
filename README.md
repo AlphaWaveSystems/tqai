@@ -160,6 +160,22 @@ src/tqai/
 └── cache/               # HuggingFace + mlx-lm integrations
 ```
 
+## Paper
+
+This library implements the TurboQuant algorithm from Google Research:
+
+> **TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate**
+> Amir Zandieh, Majid Daliri, Majid Hadian, Vahab Mirrokni
+> ICLR 2026 | [arXiv:2504.19874](https://arxiv.org/abs/2504.19874) | [Google Research Blog](https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/)
+
+Related work:
+- [PolarQuant](https://arxiv.org/abs/2502.02617) (AISTATS 2026) — Stage 1 polar coordinate quantization
+- [QJL](https://dl.acm.org/doi/10.1609/aaai.v39i24.34773) (AAAI 2025) — Quantized Johnson-Lindenstrauss transform
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). All commits require a DCO sign-off (`git commit -s`).
+
 ## License
 
 MIT
