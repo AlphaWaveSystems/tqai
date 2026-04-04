@@ -5,8 +5,9 @@ from dataclasses import dataclass
 
 @dataclass
 class TurboQuantConfig:
-    """Configuration for TurboQuant KV cache compression."""
+    """Configuration for TurboQuant KV cache and forward-pass compression."""
 
+    # KV cache compression (v0.1)
     bits_k: int = 4
     bits_v: int = 2
     seed: int = 42
@@ -14,3 +15,16 @@ class TurboQuantConfig:
     backend: str | None = None
     device: str | None = None
     config_path: str | None = None
+
+    # Forward-pass activation compression (v0.2)
+    compress_hidden: bool = False
+    bits_hidden: int = 8
+    compress_ffn: bool = False
+    bits_ffn: int = 8
+    compress_attn_logits: bool = False
+    bits_attn: int = 8
+
+    @property
+    def has_forward_compression(self) -> bool:
+        """True if any forward-pass compression is enabled."""
+        return self.compress_hidden or self.compress_ffn or self.compress_attn_logits

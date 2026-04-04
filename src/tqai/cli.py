@@ -71,6 +71,13 @@ def cmd_run(args):
     backend = args.backend
     no_tqai = args.no_tqai
     tqai_config = getattr(args, "tqai_config", None)
+    compress_hidden = getattr(args, "compress_hidden", False)
+    compress_ffn = getattr(args, "compress_ffn", False)
+    bits_hidden = getattr(args, "bits_hidden", 8)
+    bits_ffn = getattr(args, "bits_ffn", 8)
+    if getattr(args, "compress_all", False):
+        compress_hidden = True
+        compress_ffn = True
 
     from tqai.backend import detect_backend
 
@@ -79,7 +86,14 @@ def cmd_run(args):
     print(f"Model:   {model_id}")
     print(f"Backend: {detected}")
     if not no_tqai:
-        print(f"Config:  K{bits_k}/V{bits_v}")
+        kv_str = f"K{bits_k}/V{bits_v}"
+        fwd_parts = []
+        if compress_hidden:
+            fwd_parts.append(f"hidden={bits_hidden}b")
+        if compress_ffn:
+            fwd_parts.append(f"ffn={bits_ffn}b")
+        fwd_str = "  +" + "+".join(fwd_parts) if fwd_parts else ""
+        print(f"Config:  {kv_str}{fwd_str}")
     else:
         print("Config:  baseline (no compression)")
     print(f"Tokens:  {max_tokens}")
@@ -88,7 +102,11 @@ def cmd_run(args):
     if detected == "mlx":
         _run_mlx(model_id, prompt, bits_k, bits_v, max_tokens, no_tqai, tqai_config)
     else:
-        _run_hf(model_id, prompt, bits_k, bits_v, max_tokens, no_tqai, backend, tqai_config)
+        _run_hf(
+            model_id, prompt, bits_k, bits_v, max_tokens, no_tqai, backend, tqai_config,
+            compress_hidden=compress_hidden, compress_ffn=compress_ffn,
+            bits_hidden=bits_hidden, bits_ffn=bits_ffn,
+        )
 
 
 def _run_mlx(model_id, prompt, bits_k, bits_v, max_tokens, no_tqai, tqai_config=None):
@@ -116,7 +134,10 @@ def _run_mlx(model_id, prompt, bits_k, bits_v, max_tokens, no_tqai, tqai_config=
         tqai.unpatch(model)
 
 
-def _run_hf(model_id, prompt, bits_k, bits_v, max_tokens, no_tqai, backend, tqai_config=None):
+def _run_hf(
+    model_id, prompt, bits_k, bits_v, max_tokens, no_tqai, backend, tqai_config=None,
+    compress_hidden=False, compress_ffn=False, bits_hidden=8, bits_ffn=8,
+):
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     import tqai
@@ -134,7 +155,14 @@ def _run_hf(model_id, prompt, bits_k, bits_v, max_tokens, no_tqai, backend, tqai
 
     cache = None
     if not no_tqai:
-        cache = tqai.patch(model, bits_k=bits_k, bits_v=bits_v, backend=backend or "torch", config_path=tqai_config)
+        cache = tqai.patch(
+            model,
+            bits_k=bits_k, bits_v=bits_v,
+            backend=backend or "torch",
+            config_path=tqai_config,
+            compress_hidden=compress_hidden, bits_hidden=bits_hidden,
+            compress_ffn=compress_ffn, bits_ffn=bits_ffn,
+        )
 
     inputs = tokenizer(prompt, return_tensors="pt")
 
@@ -345,6 +373,16 @@ def main():
     run.add_argument("--backend", default=None, help="torch or mlx (auto)")
     run.add_argument("--no-tqai", action="store_true", help="Run without compression (baseline)")
     run.add_argument("--tqai-config", default=None, help="Path to pre-converted tqai config dir")
+    run.add_argument("--compress-all", action="store_true",
+                     help="Enable all forward-pass compression (hidden + FFN, PyTorch only)")
+    run.add_argument("--compress-hidden", action="store_true",
+                     help="Compress residual stream (hidden states, PyTorch only)")
+    run.add_argument("--compress-ffn", action="store_true",
+                     help="Compress FFN intermediate activations (PyTorch only)")
+    run.add_argument("--bits-hidden", type=int, default=8,
+                     help="Bits for hidden state compression (default: 8)")
+    run.add_argument("--bits-ffn", type=int, default=8,
+                     help="Bits for FFN compression (default: 8)")
 
     # compare
     comp = sub.add_parser("compare", help="Compare baseline vs tqai output side by side")
