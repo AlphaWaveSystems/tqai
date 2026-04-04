@@ -74,13 +74,13 @@ tqai.unpatch(model)
 
 ## How It Works
 
-tqai implements Stage 1 of TurboQuant (PolarQuant):
+TurboQuant consists of two stages. tqai implements PolarQuant (the core compression) and deliberately omits QJL (the residual correction), which [independent research](https://github.com/tonbistudio/turboquant-pytorch) found to degrade softmax-based attention quality.
 
-1. **Random orthogonal rotation** — Rotates KV vectors by a fixed Haar-distributed matrix to spread information across all coordinates
-2. **Lloyd-Max scalar quantization** — Quantizes each coordinate independently using precomputed optimal codebooks
-3. **Norm preservation** — Stores vector norms separately in FP16
+1. **Random orthogonal rotation** — Rotates KV vectors by a fixed Haar-distributed matrix to spread information uniformly across all coordinates
+2. **Lloyd-Max scalar quantization** — Quantizes each coordinate independently using precomputed optimal codebooks derived from the known post-rotation distribution
+3. **Norm preservation** — Stores vector norms separately in FP16 for lossless magnitude reconstruction
 
-No training, calibration, or model-specific tuning required. The same codebooks work for any model.
+No training, calibration, or model-specific tuning required. Fully data-oblivious — the same codebooks work for any model.
 
 ## Quality Results
 
@@ -169,8 +169,8 @@ This library implements the TurboQuant algorithm from Google Research:
 > ICLR 2026 | [arXiv:2504.19874](https://arxiv.org/abs/2504.19874) | [Google Research Blog](https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/)
 
 Related work:
-- [PolarQuant](https://arxiv.org/abs/2502.02617) (AISTATS 2026) — Stage 1 polar coordinate quantization
-- [QJL](https://dl.acm.org/doi/10.1609/aaai.v39i24.34773) (AAAI 2025) — Quantized Johnson-Lindenstrauss transform
+- [PolarQuant](https://arxiv.org/abs/2502.02617) (AISTATS 2026) — Random rotation + polar coordinate quantization (the core of tqai)
+- [QJL](https://dl.acm.org/doi/10.1609/aaai.v39i24.34773) (AAAI 2025) — Quantized Johnson-Lindenstrauss residual correction (omitted in tqai — hurts softmax attention)
 
 ## Contributing
 
