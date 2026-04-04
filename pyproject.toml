@@ -73,6 +73,7 @@ select = ["E", "F", "I", "W"]
 "src/tqai/cli.py" = ["E501"]
 "tests/test_e2e_*.py" = ["E501"]
 "tests/test_convert.py" = ["E501"]
+"scripts/*.py" = ["E501", "I001"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["tqai"]

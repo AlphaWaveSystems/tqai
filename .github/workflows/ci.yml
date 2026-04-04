@@ -17,27 +17,43 @@ jobs:
       - run: pip install ruff
       - run: ruff check .
 
-  test:
-    runs-on: ${{ matrix.os }}
+  test-linux:
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
         python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+      - name: Run tests (torch only)
+        run: |
+          pytest tests/ \
+            --ignore=tests/test_e2e_models.py \
+            --ignore=tests/test_e2e_large_models.py \
+            --ignore=tests/test_cache_mlx.py \
+            -v --tb=short
 
+  test-macos:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
       - name: Install dependencies
         run: |
           pip install -e ".[dev]"
-          if [[ "$RUNNER_OS" == "macOS" ]]; then
-            pip install mlx mlx-lm || true
-          fi
-
-      - name: Run tests
+          pip install mlx mlx-lm
+      - name: Run tests (torch + MLX)
         run: |
           pytest tests/ \
             --ignore=tests/test_e2e_models.py \
