@@ -1,0 +1,55 @@
+name: Bug Report
+description: Report a bug in tqai
+labels: [bug]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear description of the bug
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: Minimal code or commands to reproduce the issue
+      render: python
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What you expected to happen
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened (include error messages)
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      options:
+        - PyTorch (CPU)
+        - PyTorch (CUDA)
+        - MLX (Apple Silicon)
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      description: Model ID you were using
+      placeholder: e.g., mlx-community/Llama-3.1-8B-Instruct-4bit
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Paste the output of `tqai info`
+      render: text
