@@ -461,6 +461,14 @@ class TestStatisticalProperties:
 
 # ─── 7. Cross-Backend Consistency ───
 
+try:
+    import mlx.core  # noqa: F401
+    _HAS_MLX = True
+except ImportError:
+    _HAS_MLX = False
+
+
+@pytest.mark.skipif(not _HAS_MLX, reason="MLX not available")
 class TestCrossBackendConsistency:
     """Ensure torch and mlx backends produce equivalent results."""
 
