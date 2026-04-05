@@ -136,27 +136,6 @@ tqai implements PolarQuant — the core of TurboQuant Stage 1 — via three step
 
 No training, calibration, or model-specific tuning required. Fully data-oblivious — the same codebooks work for any model.
 
-### Rotation Baking (v0.2)
-
-The per-token rotation multiply `K @ R^T` can be eliminated by pre-baking the rotation matrix into the model's weight matrices offline:
-
-```bash
-# Bake rotation into weights (one-time, saves a new model directory)
-tqai bake -m Qwen/Qwen2.5-7B-Instruct -o ./qwen7b-baked/
-
-# Use baked model — auto-detects pre_rotated=True, near-baseline throughput
-tqai run "Explain gravity" -m ./qwen7b-baked/
-```
-
-Or in Python:
-```python
-from tqai.bake import save_baked_model
-save_baked_model(model, tokenizer, output_dir="./qwen7b-baked/",
-                 base_model_id="Qwen/Qwen2.5-7B-Instruct", bits_k=4, bits_v=2)
-```
-
-The baked model is a standard HuggingFace model directory — compatible with `transformers` and `mlx-lm` without tqai installed.
-
 ### QJL Stage 2 (opt-in)
 
 tqai optionally implements QJL (Johnson-Lindenstrauss residual sketch), which corrects the systematic inner-product bias left by Stage 1:
@@ -190,10 +169,6 @@ tqai run "Explain gravity" --model Qwen/Qwen2.5-3B-Instruct --use-qjl
 # Compare baseline vs compressed side by side
 tqai compare "Explain gravity" --model mlx-community/Qwen2.5-7B-Instruct-8bit
 
-# Pre-bake rotation into model weights (eliminates per-token rotation cost)
-tqai bake -m Qwen/Qwen2.5-7B-Instruct -o ./qwen7b-baked/
-tqai run "Explain gravity" -m ./qwen7b-baked/    # auto-detects baked model
-
 # Pre-convert a model for faster startup
 tqai convert --model mlx-community/Qwen2.5-7B-Instruct-8bit --output ./qwen7b-tqai/
 
@@ -213,7 +188,6 @@ cache = tqai.patch(
     sink_tokens=4,         # Keep first N tokens uncompressed (attention sinks)
     backend="torch",       # Force backend: "torch" or "mlx"
     device="cuda",         # PyTorch device (ignored for MLX)
-    pre_rotated=False,     # Set True when using a baked model
     use_qjl=False,         # Enable QJL Stage 2 residual correction (research)
     qjl_sketch_size=64,    # JL sketch dimension (tradeoff: quality vs memory)
 )
@@ -246,7 +220,6 @@ src/tqai/
 ├── __init__.py          # patch(), unpatch(), TurboQuantConfig
 ├── config.py            # Configuration dataclass
 ├── quantizer.py         # PolarQuantizer (core algorithm + QJL Stage 2)
-├── bake.py              # Rotation baking — fuse R into model weights
 ├── hooks.py             # Forward-pass activation compression hooks
 ├── module_utils.py      # Transformer layer inspection utilities
 ├── backend/             # PyTorch + MLX abstraction layer

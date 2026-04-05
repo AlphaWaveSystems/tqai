@@ -24,8 +24,7 @@ class TurboQuantConfig:
     compress_attn_logits: bool = False
     bits_attn: int = 8
 
-    # Rotation baking + QJL Stage 2 (v0.3)
-    pre_rotated: bool = False
+    # QJL Stage 2 (v0.2, opt-in)
     use_qjl: bool = False
     qjl_sketch_size: int = 64
 

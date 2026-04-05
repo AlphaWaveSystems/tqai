@@ -253,41 +253,6 @@ def cmd_compare(args):
         print(tokenizer.decode(output[0], skip_special_tokens=True))
 
 
-def cmd_bake(args):
-    """Bake rotation matrices into model weights and save as HuggingFace model."""
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-
-    try:
-        import torch
-    except ImportError as e:
-        raise SystemExit("tqai bake requires PyTorch") from e
-
-    model_id = args.model
-    output_dir = args.output
-    bits_k = args.bits_k
-    bits_v = args.bits_v
-    seed = args.seed
-
-    print(f"Loading {model_id}...")
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.float32)
-    model.train(False)
-
-    from tqai.bake import save_baked_model
-
-    out_path = save_baked_model(
-        model=model,
-        tokenizer=tokenizer,
-        output_dir=output_dir,
-        base_model_id=model_id,
-        bits_k=bits_k,
-        bits_v=bits_v,
-        seed=seed,
-    )
-    print(f"\nBaked model saved to: {out_path}")
-    print(f"Usage: tqai run 'prompt' -m {out_path}")
-
-
 def cmd_convert(args):
     """Pre-convert a model for faster TurboQuant inference."""
     from tqai.convert import convert_model
@@ -436,14 +401,6 @@ def main():
     comp.add_argument("--bits-v", type=int, default=2, help="Value bits (default: 2)")
     comp.add_argument("--max-tokens", type=int, default=100, help="Max tokens (default: 100)")
 
-    # bake
-    bake = sub.add_parser("bake", help="Bake rotation matrices into model weights (eliminates runtime rotation)")
-    bake.add_argument("--model", "-m", required=True, help="HuggingFace model ID or local path")
-    bake.add_argument("--output", "-o", required=True, help="Output directory for baked model")
-    bake.add_argument("--bits-k", type=int, default=4, help="Key bits (default: 4)")
-    bake.add_argument("--bits-v", type=int, default=2, help="Value bits (default: 2)")
-    bake.add_argument("--seed", type=int, default=42, help="RNG seed (default: 42)")
-
     # convert
     conv = sub.add_parser("convert", help="Pre-convert a model for faster tqai inference")
     conv.add_argument("--model", "-m", required=True, help="Model ID (HuggingFace or mlx-community)")
@@ -462,8 +419,6 @@ def main():
         cmd_run(args)
     elif args.command == "compare":
         cmd_compare(args)
-    elif args.command == "bake":
-        cmd_bake(args)
     elif args.command == "convert":
         cmd_convert(args)
     else:

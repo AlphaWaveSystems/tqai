@@ -42,7 +42,6 @@ class TurboQuantDynamicCache(DynamicCache):
                 bits=bits,
                 seed=self.tq_config.seed + layer_idx + (0 if is_key else 10000),
                 ops=self._ops,
-                pre_rotated=self.tq_config.pre_rotated,
                 use_qjl=self.tq_config.use_qjl,
                 qjl_sketch_size=self.tq_config.qjl_sketch_size,
             )

@@ -1,0 +1,29 @@
+{
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "bits_k": 4,
+  "bits_v": 2,
+  "timestamp": "2026-04-05T00:18:07",
+  "results": [
+    {
+      "mode": "baseline",
+      "perplexity": 4.358,
+      "delta_ppl": 0.0,
+      "tokens_per_sec": 70.17,
+      "match_rate": 1.0
+    },
+    {
+      "mode": "tqai-runtime",
+      "perplexity": 4.358,
+      "delta_ppl": 0.0,
+      "tokens_per_sec": 70.45,
+      "match_rate": 1.0
+    },
+    {
+      "mode": "tqai-baked",
+      "perplexity": 10580370.0041,
+      "delta_ppl": 10580365.646,
+      "tokens_per_sec": 48.14,
+      "match_rate": 0.2754
+    }
+  ]
+}

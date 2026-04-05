@@ -27,7 +27,6 @@ class TurboQuantMLXCache:
             bits=config.bits_k,
             seed=config.seed,
             ops=self._ops,
-            pre_rotated=config.pre_rotated,
             use_qjl=config.use_qjl,
             qjl_sketch_size=config.qjl_sketch_size,
         )
@@ -36,7 +35,6 @@ class TurboQuantMLXCache:
             bits=config.bits_v,
             seed=config.seed + 10000,
             ops=self._ops,
-            pre_rotated=config.pre_rotated,
             use_qjl=config.use_qjl,
             qjl_sketch_size=config.qjl_sketch_size,
         )

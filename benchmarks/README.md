@@ -40,40 +40,6 @@ Output columns: `Config | PPL | ΔPPL | tok/s | vs baseline | Match`
 
 Results are saved to `benchmarks/results/<model_id>_<backend>.json`.
 
----
-
-### `benchmark_bake.py` — Rotation baking throughput benchmark
-
-Compares five modes side-by-side to measure the throughput impact of pre-baking the rotation matrix into model weights:
-
-| Mode | Description |
-|------|-------------|
-| `baseline` | No compression |
-| `tqai-runtime` | Current behaviour — rotation at every token |
-| `tqai-baked` | Rotation pre-baked into weights (target: ~baseline throughput) |
-| `tqai-qjl-only` | Runtime rotation + QJL Stage 2 |
-| `tqai-baked+qjl` | Baked rotation + QJL |
-
-```bash
-# Full comparison (all 5 modes)
-python benchmarks/benchmark_bake.py --model Qwen/Qwen2.5-0.5B-Instruct
-
-# Specific modes only
-python benchmarks/benchmark_bake.py \
-    --model Qwen/Qwen2.5-3B-Instruct \
-    --modes baseline tqai-runtime tqai-baked \
-    --bits-k 4 --bits-v 2
-
-# Custom seed and temp dir for baked model
-python benchmarks/benchmark_bake.py \
-    --model Qwen/Qwen2.5-7B-Instruct \
-    --tmp-dir /tmp/tqai-bake-bench
-```
-
-Results are saved to `benchmarks/results/<model_id>_bake_k<N>v<N>.json`.
-
----
-
 ### `eval_perplexity.py` — Perplexity helper (internal)
 
 Used by the benchmark scripts. Provides `perplexity_hf()`, `perplexity_mlx()`, `generate_tokens()`, and `compute_match_rate()`. Not intended to be run directly.

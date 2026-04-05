@@ -4,7 +4,6 @@ Stage 1 (PolarQuant):
   1. Store L2 norm as FP16
   2. Normalize to unit sphere
   3. Rotate by a fixed random orthogonal matrix (Haar-distributed, seeded)
-     — skipped when ``pre_rotated=True`` (model weights already baked)
   4. Quantize each coordinate via precomputed Lloyd-Max codebook
   5. Store coordinate indices as uint8
 
@@ -16,7 +15,7 @@ Stage 2 (QJL, optional, default off):
   average. Enable via ``use_qjl=True`` only for research or non-softmax use.
 
 Dequantization reverses: lookup centroids -> (optional JL correction) ->
-inverse rotate (skipped if pre_rotated) -> scale by norm.
+inverse rotate -> scale by norm.
 
 Reference: TurboQuant (arXiv:2504.19874), PolarQuant (arXiv:2502.02617),
            QJL (AAAI 2025, dl.acm.org/doi/10.1609/aaai.v39i24.34773).
@@ -39,9 +38,6 @@ class PolarQuantizer:
         bits: Bits per coordinate (2, 3, 4, 6, or 8).
         seed: RNG seed for the rotation matrix.
         ops: Backend ops object (auto-detected if None).
-        pre_rotated: If True, skip the rotation step in quantize/dequantize.
-            Use when the model's weight matrices have the rotation pre-baked
-            (via ``tqai bake``).
         use_qjl: If True, compute and store a QJL residual sketch during
             quantization (Stage 2). The sketch is returned as a third element
             and, if passed to ``dequantize``, adds a correction to the
@@ -55,7 +51,6 @@ class PolarQuantizer:
         bits: int,
         seed: int = 42,
         ops: Any | None = None,
-        pre_rotated: bool = False,
         use_qjl: bool = False,
         qjl_sketch_size: int = 64,
     ):
@@ -63,7 +58,6 @@ class PolarQuantizer:
         self.bits = bits
         self.seed = seed
         self.ops = ops or get_backend()
-        self.pre_rotated = pre_rotated
         self.use_qjl = use_qjl
         self.qjl_sketch_size = qjl_sketch_size
 
@@ -141,11 +135,8 @@ class PolarQuantizer:
         safe_norms = norms + 1e-10
         x_unit = self.ops.float32(x) / self.ops.float32(safe_norms)
 
-        # 3. Rotate: y = x_unit @ R^T  (skipped if weights are pre-baked)
-        if self.pre_rotated:
-            y = x_unit
-        else:
-            y = self.ops.matmul(x_unit, self.ops.transpose(self._rotation))
+        # 3. Rotate: y = x_unit @ R^T
+        y = self.ops.matmul(x_unit, self.ops.transpose(self._rotation))
 
         # 4. Per-coordinate quantization: find nearest centroid
         y_expanded = self.ops.unsqueeze(y, -1)  # (..., d, 1)
@@ -209,11 +200,8 @@ class PolarQuantizer:
             scale = self.ops.float32(residual_norm) * correction_norm
             y_hat = y_hat + correction_dir * scale
 
-        # 3. Inverse rotation: x_unit_hat = y_hat @ R  (skipped if pre-baked)
-        if self.pre_rotated:
-            x_unit_hat = y_hat
-        else:
-            x_unit_hat = self.ops.matmul(y_hat, self._rotation)
+        # 3. Inverse rotation: x_unit_hat = y_hat @ R
+        x_unit_hat = self.ops.matmul(y_hat, self._rotation)
 
         # 4. Scale by norm
         x_hat = x_unit_hat * self.ops.float32(norms)
