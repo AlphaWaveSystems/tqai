@@ -16,9 +16,6 @@ Based on [TurboQuant](https://arxiv.org/abs/2504.19874) (Google Research, ICLR 2
 ## Installation
 
 ```bash
-# Homebrew (macOS)
-brew install alphawavesystems/tap/tqai
-
 # PyPI
 pip install tqai
 
@@ -27,6 +24,11 @@ pip install tqai[torch]
 
 # With MLX backend (Apple Silicon)
 pip install tqai[mlx]
+
+# Global CLI install (no venv management)
+pipx install tqai
+pipx inject tqai mlx mlx-lm   # add MLX backend
+pipx inject tqai torch         # or PyTorch backend
 ```
 
 ---

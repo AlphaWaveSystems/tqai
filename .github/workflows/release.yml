@@ -67,15 +67,3 @@ jobs:
             --title "$TAG_NAME" \
             --notes-file CHANGELOG.md
 
-  notify-homebrew:
-    needs: publish-pypi
-    runs-on: ubuntu-latest
-    steps:
-      - name: Trigger Homebrew formula update
-        env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          VERSION: ${{ github.ref_name }}
-        run: |
-          gh api repos/AlphaWaveSystems/homebrew-tap/dispatches \
-            -f event_type=tqai-release \
-            -f "client_payload[version]=$VERSION" || true
