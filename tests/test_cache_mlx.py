@@ -92,3 +92,28 @@ def test_state_property(cache):
     assert not cache.is_empty
     state_k, state_v = cache.state
     assert state_k.shape[2] == 5
+
+
+def test_qjl_cache_reconstruction_fidelity():
+    """MLX cache with use_qjl=True should still reconstruct with reasonable fidelity."""
+    from tqai.cache.mlx import TurboQuantMLXCache
+    from tqai.config import TurboQuantConfig
+
+    config = TurboQuantConfig(bits_k=4, bits_v=2, backend="mlx",
+                               use_qjl=True, qjl_sketch_size=64)
+    cache = TurboQuantMLXCache(head_dim=64, n_kv_heads=4, config=config)
+    k, v = _rand_kv(seq=16, dim=64)
+    all_k, _ = cache.update_and_fetch(k, v)
+
+    k_np = np.array(k)
+    all_k_np = np.array(all_k)
+    cos_sims = []
+    for h in range(k_np.shape[1]):
+        for s in range(k_np.shape[2]):
+            orig = k_np[0, h, s]
+            recon = all_k_np[0, h, s]
+            cos = np.dot(orig, recon) / (np.linalg.norm(orig) * np.linalg.norm(recon) + 1e-10)
+            cos_sims.append(cos)
+
+    mean_cos = np.mean(cos_sims)
+    assert mean_cos > 0.85, f"QJL MLX cache cosine similarity too low: {mean_cos:.4f}"
