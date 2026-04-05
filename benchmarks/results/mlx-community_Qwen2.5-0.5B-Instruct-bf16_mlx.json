@@ -1,70 +1,70 @@
 {
   "model": "mlx-community/Qwen2.5-0.5B-Instruct-bf16",
   "backend": "mlx",
-  "timestamp": "2026-04-04T23:46:40",
+  "timestamp": "2026-04-05T00:30:23",
   "results": [
     {
       "config": "baseline",
-      "peak_mb": 14.63,
+      "peak_mb": 14.53,
       "perplexity": 4.3438,
       "delta_ppl": 0.0,
-      "tokens_per_sec": 324.58,
+      "tokens_per_sec": 304.76,
       "match_rate": 1.0
     },
     {
       "config": "kv-only",
-      "peak_mb": 14.61,
+      "peak_mb": 13.78,
       "perplexity": 4.3438,
       "delta_ppl": 0.0,
-      "tokens_per_sec": 30.76,
+      "tokens_per_sec": 33.67,
       "match_rate": 0.04
     },
     {
       "config": "kv+hidden8",
-      "peak_mb": 24.12,
+      "peak_mb": 25.12,
       "perplexity": 4.3438,
       "delta_ppl": 0.0,
-      "tokens_per_sec": 20.2,
+      "tokens_per_sec": 33.75,
       "match_rate": 0.04
     },
     {
       "config": "kv+hidden6",
-      "peak_mb": 2.44,
+      "peak_mb": 1.51,
       "perplexity": 4.3438,
       "delta_ppl": 0.0,
-      "tokens_per_sec": 19.37,
+      "tokens_per_sec": 33.66,
       "match_rate": 0.04
     },
     {
       "config": "kv+ffn8",
-      "peak_mb": 0.34,
+      "peak_mb": -0.02,
       "perplexity": 4.3438,
       "delta_ppl": 0.0,
-      "tokens_per_sec": 21.97,
+      "tokens_per_sec": 33.56,
       "match_rate": 0.04
     },
     {
       "config": "all8",
-      "peak_mb": -0.16,
+      "peak_mb": 0.07,
       "perplexity": 4.3438,
       "delta_ppl": 0.0,
-      "tokens_per_sec": 23.8,
+      "tokens_per_sec": 33.61,
       "match_rate": 0.04
     },
     {
       "config": "all6",
-      "peak_mb": 0.2,
+      "peak_mb": -0.33,
       "perplexity": 4.3438,
       "delta_ppl": 0.0,
-      "tokens_per_sec": 20.2,
+      "tokens_per_sec": 33.83,
       "match_rate": 0.04
     },
     {
       "config": "aggressive",
-      "peak_mb": 0.93,
+      "peak_mb": 0.36,
       "perplexity": 4.3438,
       "delta_ppl": 0.0,
-      "tokens_per_sec": 22.32,
+      "tokens_per_sec": 33.59,
       "match_rate": 0.04
     }
   ]
