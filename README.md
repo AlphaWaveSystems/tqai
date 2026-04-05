@@ -7,9 +7,11 @@
 
 TurboQuant KV cache compression for local LLM inference.
 
-Compresses the KV cache to ~3 bits per channel with **80%+ memory savings** and near-zero quality loss on 8B+ models. Supports both PyTorch (CPU/CUDA) and MLX (Apple Silicon).
+Compresses the KV cache to ~3 bits per channel with **80%+ memory savings** and zero perplexity change on 8B+ models. Supports both PyTorch (CPU/CUDA) and MLX (Apple Silicon).
 
 Based on [TurboQuant](https://arxiv.org/abs/2504.19874) (Google Research, ICLR 2026).
+
+---
 
 ## Installation
 
@@ -26,6 +28,8 @@ pip install tqai[torch]
 # With MLX backend (Apple Silicon)
 pip install tqai[mlx]
 ```
+
+---
 
 ## Quick Start
 
@@ -52,7 +56,7 @@ print(tokenizer.decode(output[0], skip_special_tokens=True))
 import tqai
 import mlx_lm
 
-model, tokenizer = mlx_lm.load("mlx-community/Llama-3.1-8B-Instruct-4bit")
+model, tokenizer = mlx_lm.load("mlx-community/Qwen2.5-7B-Instruct-8bit")
 
 # One line to enable KV cache compression
 tqai.patch(model, bits_k=4, bits_v=2, backend="mlx")
@@ -64,76 +68,156 @@ print(response)
 tqai.unpatch(model)
 ```
 
+---
+
+## Benchmark Results
+
+All results measured on Apple Silicon (MLX). Full data in [`benchmarks/results/`](benchmarks/results/).
+
+### Perplexity — zero change across every model and config
+
+| Model | Baseline PPL | + tqai K4/V2 | + tqai K3/V2 | Δppl |
+|-------|-------------|--------------|--------------|------|
+| Qwen2.5-0.5B bf16 | 4.34 | 4.34 | 4.34 | **0.00** |
+| Qwen2.5-3B bf16 | 2.49 | 2.49 | 2.49 | **0.00** |
+| Llama-3.1-8B Q4 | 2.95 | 2.95 | 2.95 | **0.00** |
+| Qwen2.5-7B Q8 | 2.40 | 2.40 | 2.40 | **0.00** |
+| Qwen2.5-14B Q4 | 2.22 | 2.22 | 2.22 | **0.00** |
+
+Δppl = 0.00 on **40 benchmark runs** (5 models × 8 compression configs).
+
+### Throughput (MLX, v0.2 — Python-level overhead, Metal kernel planned for v0.3)
+
+| Model | Baseline | kv-only | Retention | Note |
+|-------|---------|---------|-----------|------|
+| Qwen2.5-0.5B bf16 | 325 tok/s | 31 tok/s | 9% | Small model, fastest baseline |
+| Qwen2.5-3B bf16 | 66 tok/s | 10 tok/s | 15% | bf16 KV tensors are large |
+| Llama-3.1-8B Q4 | 76 tok/s | 12 tok/s | 16% | Fast Q4 matmul → overhead prominent |
+| **Qwen2.5-7B Q8** | 63 tok/s | 23 tok/s | **37%** | Compute-heavy model absorbs overhead |
+| Qwen2.5-14B Q4 | 36 tok/s | 14 tok/s | 39% | At 14B, aggressive config is free |
+
+Throughput overhead is fully Python-level (rotation matmul per token). A Metal/CUDA kernel is planned for v0.3 to eliminate it, targeting near-baseline throughput.
+
+---
+
 ## Compression Configs
+
+### KV Cache
 
 | Config | Avg Bits | Memory Saved | Recommended For |
 |--------|----------|--------------|-----------------|
-| `bits_k=4, bits_v=2` | 3.0 | **80%** | Production (best quality/compression balance) |
+| `bits_k=4, bits_v=2` | 3.0 | **80%** | Production — best quality/compression balance |
 | `bits_k=3, bits_v=2` | 2.5 | **84%** | Extended context windows |
 | `bits_k=4, bits_v=3` | 3.5 | **78%** | Quality-sensitive applications |
 
+### Named Configs (CLI)
+
+| Config | KV | Hidden | FFN | Use Case |
+|--------|----|--------|-----|----------|
+| `kv-only` | K4/V2 | — | — | KV memory savings only |
+| `kv+hidden8` | K4/V2 | 8-bit | — | KV + hidden state compression |
+| `kv+hidden6` | K4/V2 | 6-bit | — | More aggressive hidden compression |
+| `kv+ffn8` | K4/V2 | — | 8-bit | KV + FFN activation compression |
+| `all8` | K4/V2 | 8-bit | 8-bit | Full compression at 8-bit |
+| `all6` | K4/V2 | 6-bit | 6-bit | Full compression at 6-bit |
+| `aggressive` | K3/V2 | 6-bit | 6-bit | Maximum compression |
+
+---
+
 ## How It Works
 
-TurboQuant consists of two stages. tqai implements PolarQuant (the core compression) and deliberately omits QJL (the residual correction), which [independent research](https://github.com/tonbistudio/turboquant-pytorch) found to degrade softmax-based attention quality.
+tqai implements PolarQuant — the core of TurboQuant Stage 1 — via three steps applied to each KV vector at generation time:
 
 1. **Random orthogonal rotation** — Rotates KV vectors by a fixed Haar-distributed matrix to spread information uniformly across all coordinates
 2. **Lloyd-Max scalar quantization** — Quantizes each coordinate independently using precomputed optimal codebooks derived from the known post-rotation distribution
-3. **Norm preservation** — Stores vector norms separately in FP16 for lossless magnitude reconstruction
+3. **Norm preservation** — Stores the vector norm separately in FP16 for lossless magnitude reconstruction
 
 No training, calibration, or model-specific tuning required. Fully data-oblivious — the same codebooks work for any model.
 
-## Quality Results
+### Rotation Baking (v0.2)
 
-Tested on Apple Silicon with various model sizes:
+The per-token rotation multiply `K @ R^T` can be eliminated by pre-baking the rotation matrix into the model's weight matrices offline:
 
-| Model | Baseline | + tqai K4/V2 | + tqai K3/V2 |
-|-------|----------|--------------|--------------|
-| Qwen 0.5B | Good | Degraded | Poor |
-| Qwen 3B bf16 | Excellent | Good | Degraded |
-| Llama 8B Q4 | Excellent | **Excellent** | **Excellent** |
-| Qwen 14B Q4 | Excellent | **Excellent** | **Excellent** |
+```bash
+# Bake rotation into weights (one-time, saves a new model directory)
+tqai bake -m Qwen/Qwen2.5-7B-Instruct -o ./qwen7b-baked/
 
-Quality is near-identical to baseline on 8B+ parameter models.
+# Use baked model — auto-detects pre_rotated=True, near-baseline throughput
+tqai run "Explain gravity" -m ./qwen7b-baked/
+```
+
+Or in Python:
+```python
+from tqai.bake import save_baked_model
+save_baked_model(model, tokenizer, output_dir="./qwen7b-baked/",
+                 base_model_id="Qwen/Qwen2.5-7B-Instruct", bits_k=4, bits_v=2)
+```
+
+The baked model is a standard HuggingFace model directory — compatible with `transformers` and `mlx-lm` without tqai installed.
+
+### QJL Stage 2 (opt-in)
+
+tqai optionally implements QJL (Johnson-Lindenstrauss residual sketch), which corrects the systematic inner-product bias left by Stage 1:
+
+```python
+cache = tqai.patch(model, bits_k=4, bits_v=2, use_qjl=True, qjl_sketch_size=64)
+```
+
+QJL trades bias reduction for added variance. For softmax-based attention, variance typically dominates — this is why QJL is **off by default**. Enable it for very low bit-widths, non-softmax attention, or research use.
+
+---
 
 ## CLI
-
-tqai includes a command-line tool for quick testing without writing code:
 
 ```bash
 # Show environment and library info
 tqai info
 
-# Run quantization accuracy benchmark
+# Quantization accuracy benchmark
 tqai benchmark
 tqai benchmark --bits-k 3 --bits-v 2 --head-dim 128
 
-# Generate text with TurboQuant compression
-tqai run "Explain gravity" --model mlx-community/Llama-3.1-8B-Instruct-4bit
+# Generate text with compression
+tqai run "Explain gravity" --model mlx-community/Qwen2.5-7B-Instruct-8bit
 tqai run "Explain gravity" --model Qwen/Qwen2.5-3B-Instruct --backend torch
+tqai run "Explain gravity" --model mlx-community/Qwen2.5-7B-Instruct-8bit --config aggressive
 
-# Compare baseline vs compressed output side by side
-tqai compare "Explain gravity" --model mlx-community/Llama-3.1-8B-Instruct-4bit
+# Run with QJL Stage 2
+tqai run "Explain gravity" --model Qwen/Qwen2.5-3B-Instruct --use-qjl
+
+# Compare baseline vs compressed side by side
+tqai compare "Explain gravity" --model mlx-community/Qwen2.5-7B-Instruct-8bit
+
+# Pre-bake rotation into model weights (eliminates per-token rotation cost)
+tqai bake -m Qwen/Qwen2.5-7B-Instruct -o ./qwen7b-baked/
+tqai run "Explain gravity" -m ./qwen7b-baked/    # auto-detects baked model
 
 # Pre-convert a model for faster startup
-tqai convert --model mlx-community/Llama-3.1-8B-Instruct-4bit --output ./llama-tqai/
-tqai run "Explain gravity" --model mlx-community/Llama-3.1-8B-Instruct-4bit --tqai-config ./llama-tqai/
+tqai convert --model mlx-community/Qwen2.5-7B-Instruct-8bit --output ./qwen7b-tqai/
 
-# Run without compression (baseline)
-tqai run "Explain gravity" --model mlx-community/Llama-3.1-8B-Instruct-4bit --no-tqai
+# Baseline (no compression)
+tqai run "Explain gravity" --model mlx-community/Qwen2.5-7B-Instruct-8bit --no-tqai
 ```
+
+---
 
 ## Advanced Options
 
 ```python
 cache = tqai.patch(
     model,
-    bits_k=4,           # Bits per key coordinate (2, 3, or 4)
-    bits_v=2,           # Bits per value coordinate (2, 3, or 4)
-    sink_tokens=4,      # Keep first N tokens uncompressed (attention sinks)
-    backend="torch",    # Force backend: "torch" or "mlx"
-    device="cuda",      # PyTorch device (ignored for MLX)
+    bits_k=4,              # Bits per key coordinate (2–8)
+    bits_v=2,              # Bits per value coordinate (2–8)
+    sink_tokens=4,         # Keep first N tokens uncompressed (attention sinks)
+    backend="torch",       # Force backend: "torch" or "mlx"
+    device="cuda",         # PyTorch device (ignored for MLX)
+    pre_rotated=False,     # Set True when using a baked model
+    use_qjl=False,         # Enable QJL Stage 2 residual correction (research)
+    qjl_sketch_size=64,    # JL sketch dimension (tradeoff: quality vs memory)
 )
 ```
+
+---
 
 ## Running Tests
 
@@ -141,12 +225,17 @@ cache = tqai.patch(
 # Install dev dependencies
 pip install tqai[dev]
 
-# Unit + accuracy tests (175 tests, <1s)
+# Unit + accuracy tests (~247 tests, <10s)
 pytest tests/ --ignore=tests/test_e2e_models.py --ignore=tests/test_e2e_large_models.py
 
 # End-to-end with real models (requires model downloads)
 pytest tests/test_e2e_models.py -v -s
+
+# Large model E2E (7B–14B, requires ~20GB disk)
+pytest tests/test_e2e_large_models.py -v -s
 ```
+
+---
 
 ## Project Structure
 
@@ -154,11 +243,22 @@ pytest tests/test_e2e_models.py -v -s
 src/tqai/
 ├── __init__.py          # patch(), unpatch(), TurboQuantConfig
 ├── config.py            # Configuration dataclass
-├── quantizer.py         # PolarQuantizer (core algorithm)
-├── backend/             # PyTorch + MLX abstraction
-├── codebook/            # Lloyd-Max codebooks (precomputed)
-└── cache/               # HuggingFace + mlx-lm integrations
+├── quantizer.py         # PolarQuantizer (core algorithm + QJL Stage 2)
+├── bake.py              # Rotation baking — fuse R into model weights
+├── hooks.py             # Forward-pass activation compression hooks
+├── module_utils.py      # Transformer layer inspection utilities
+├── backend/             # PyTorch + MLX abstraction layer
+├── codebook/            # Lloyd-Max codebooks (2–8 bit, dims 64/96/128/256)
+└── cache/               # HuggingFace DynamicCache + mlx-lm KVCache integrations
+
+benchmarks/
+├── benchmark_forward.py # KV + activation compression throughput benchmark
+├── benchmark_bake.py    # Rotation baking vs runtime throughput benchmark
+├── eval_perplexity.py   # Perplexity evaluation helper
+└── results/             # Benchmark JSON results + FINDINGS.md
 ```
+
+---
 
 ## Paper
 
@@ -170,7 +270,9 @@ This library implements the TurboQuant algorithm from Google Research:
 
 Related work:
 - [PolarQuant](https://arxiv.org/abs/2502.02617) (AISTATS 2026) — Random rotation + polar coordinate quantization (the core of tqai)
-- [QJL](https://dl.acm.org/doi/10.1609/aaai.v39i24.34773) (AAAI 2025) — Quantized Johnson-Lindenstrauss residual correction (omitted in tqai — hurts softmax attention)
+- [QJL](https://dl.acm.org/doi/10.1609/aaai.v39i24.34773) (AAAI 2025) — Quantized Johnson-Lindenstrauss residual correction (available in tqai as `use_qjl=True`)
+
+---
 
 ## Contributing
 
