@@ -7,7 +7,8 @@ import pytest
 
 try:
     import mlx.core as mx
-    from tqai.kernels import metal_available, metal_quantize, metal_dequantize
+
+    from tqai.kernels import metal_available, metal_dequantize, metal_quantize
 
     HAS_METAL = metal_available()
 except ImportError:

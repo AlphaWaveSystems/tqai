@@ -242,7 +242,9 @@ class TurboQuantMLXCache:
             return self._reconstruct_full(is_key, mx)
 
         buffer = self._k_buffer if is_key else self._v_buffer
-        recent = (self._recent_keys if is_key else self._recent_values) if self._strategy == "residual" else None
+        recent = None
+        if self._strategy == "residual":
+            recent = self._recent_keys if is_key else self._recent_values
 
         parts = []
         if sink is not None:
@@ -311,12 +313,18 @@ def _detect_head_dim_and_kv_heads(model) -> tuple[int, int]:
     Falls back to inspecting the first attention layer if args are nested.
     """
     # Try direct model.args first (Qwen, Llama, etc.)
-    for source in [model, getattr(model, "language_model", None), getattr(model, "text_model", None)]:
+    candidates = [
+        model,
+        getattr(model, "language_model", None),
+        getattr(model, "text_model", None),
+    ]
+    for source in candidates:
         if source is None or not hasattr(source, "args"):
             continue
         args = source.args
         head_dim = getattr(args, "head_dim", None)
-        if head_dim is None and hasattr(args, "hidden_size") and hasattr(args, "num_attention_heads"):
+        has_dims = hasattr(args, "hidden_size") and hasattr(args, "num_attention_heads")
+        if head_dim is None and has_dims:
             head_dim = args.hidden_size // args.num_attention_heads
         n_kv_heads = getattr(args, "num_key_value_heads", getattr(args, "num_attention_heads", 1))
         if head_dim:

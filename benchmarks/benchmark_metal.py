@@ -17,7 +17,7 @@ import mlx.core as mx
 import numpy as np
 
 from tqai.backend import get_backend
-from tqai.kernels import metal_available, metal_quantize, metal_dequantize
+from tqai.kernels import metal_available, metal_dequantize, metal_quantize
 from tqai.quantizer import PolarQuantizer
 
 
@@ -37,6 +37,13 @@ def _bench(fn, warmup=10, iters=100):
         mx.synchronize()
         times.append((time.perf_counter() - t0) * 1000)
     return np.median(times)
+
+
+def _print_row(label, op, py_ms, m_ms, speedup):
+    print(
+        f"{label:<25} {op:<12} {py_ms:>11.3f}"
+        f"  {m_ms:>11.3f}  {speedup:>7.1f}x"
+    )
 
 
 def run_benchmark():
@@ -72,7 +79,7 @@ def run_benchmark():
             m_q_ms = _bench(lambda: metal_quantize(x, pq._rotation, pq._centroids))
 
             speedup_q = py_q_ms / m_q_ms
-            print(f"{label:<25} {'quantize':<12} {py_q_ms:>11.3f}  {m_q_ms:>11.3f}  {speedup_q:>7.1f}x")
+            _print_row(label, "quantize", py_q_ms, m_q_ms, speedup_q)
 
             # Get indices/norms for dequantize bench
             indices, norms = metal_quantize(x, pq._rotation, pq._centroids)
@@ -85,7 +92,7 @@ def run_benchmark():
             m_d_ms = _bench(lambda: metal_dequantize(indices, norms, pq._rotation, pq._centroids))
 
             speedup_d = py_d_ms / m_d_ms
-            print(f"{'':<25} {'dequantize':<12} {py_d_ms:>11.3f}  {m_d_ms:>11.3f}  {speedup_d:>7.1f}x")
+            _print_row("", "dequantize", py_d_ms, m_d_ms, speedup_d)
 
             # Roundtrip
             pq._use_metal = True
@@ -93,7 +100,7 @@ def run_benchmark():
             pq._use_metal = False
             py_rt_ms = _bench(lambda: pq.dequantize(*pq.quantize(x)))
             speedup_rt = py_rt_ms / m_rt_ms
-            print(f"{'':<25} {'roundtrip':<12} {py_rt_ms:>11.3f}  {m_rt_ms:>11.3f}  {speedup_rt:>7.1f}x")
+            _print_row("", "roundtrip", py_rt_ms, m_rt_ms, speedup_rt)
             print()
 
 

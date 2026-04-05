@@ -74,6 +74,7 @@ select = ["E", "F", "I", "W"]
 "tests/test_e2e_*.py" = ["E501"]
 "tests/test_convert.py" = ["E501"]
 "scripts/*.py" = ["E501", "I001"]
+"benchmarks/*.py" = ["E402"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["tqai"]
