@@ -1,8 +1,8 @@
-"""tqai — TurboQuant KV cache compression for local LLM inference."""
+"""tqai — TurboQuant KV cache and forward-pass compression for local LLM inference."""
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from tqai.config import TurboQuantConfig
 
@@ -15,8 +15,23 @@ def patch(
     backend: str | None = None,
     device: str | None = None,
     config_path: str | None = None,
+    # Forward-pass compression (v0.2)
+    compress_hidden: bool = False,
+    bits_hidden: int = 8,
+    compress_ffn: bool = False,
+    bits_ffn: int = 8,
+    compress_attn_logits: bool = False,
+    bits_attn: int = 8,
+    # Rotation baking + QJL (v0.3)
+    pre_rotated: bool = False,
+    use_qjl: bool = False,
+    qjl_sketch_size: int = 64,
 ):
-    """Enable TurboQuant KV cache compression on a model.
+    """Enable TurboQuant compression on a model.
+
+    KV cache compression works with both PyTorch (HuggingFace) and MLX backends.
+    Forward-pass activation compression (``compress_hidden``, ``compress_ffn``,
+    ``compress_attn_logits``) is currently supported for PyTorch only.
 
     Args:
         model: HuggingFace model or mlx-lm model.
@@ -28,6 +43,20 @@ def patch(
         config_path: Path to a pre-converted tqai config directory
             (from ``tqai convert``). When provided, ``bits_k`` and ``bits_v``
             are read from the saved config.
+        compress_hidden: Compress residual stream (hidden states) entering
+            each attention and FFN block. PyTorch only.
+        bits_hidden: Bits for hidden state compression (default 8).
+        compress_ffn: Compress hidden states entering FFN/MLP blocks. PyTorch only.
+        bits_ffn: Bits for FFN input compression (default 8).
+        compress_attn_logits: Reserved for future use (attention logit compression).
+        bits_attn: Bits for attention logit compression (default 8).
+        pre_rotated: If True, skip rotation in PolarQuantizer (use when model weights
+            have been baked via ``tqai bake``). Auto-detected if ``tqai_bake_config.json``
+            is present in the model directory.
+        use_qjl: If True, enable QJL Stage 2 residual sketch (default False).
+            Adds a 1-bit JL sketch to each KV token for inner-product bias correction.
+            NOTE: degrades softmax attention on average; use for research only.
+        qjl_sketch_size: Number of 1-bit JL projections (default 64).
 
     Returns:
         For HuggingFace: a ``TurboQuantDynamicCache`` to pass as ``past_key_values``.
@@ -51,12 +80,21 @@ def patch(
         backend=backend,
         device=device,
         config_path=config_path,
+        compress_hidden=compress_hidden,
+        bits_hidden=bits_hidden,
+        compress_ffn=compress_ffn,
+        bits_ffn=bits_ffn,
+        compress_attn_logits=compress_attn_logits,
+        bits_attn=bits_attn,
+        pre_rotated=pre_rotated,
+        use_qjl=use_qjl,
+        qjl_sketch_size=qjl_sketch_size,
     )
     return _patch(model, config)
 
 
 def unpatch(model):
-    """Restore original cache behaviour."""
+    """Remove TurboQuant compression hooks and restore original cache behaviour."""
     from tqai._patch import _unpatch
 
     _unpatch(model)

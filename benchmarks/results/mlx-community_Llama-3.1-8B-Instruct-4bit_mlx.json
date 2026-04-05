@@ -1,0 +1,71 @@
+{
+  "model": "mlx-community/Llama-3.1-8B-Instruct-4bit",
+  "backend": "mlx",
+  "timestamp": "2026-04-04T23:47:10",
+  "results": [
+    {
+      "config": "baseline",
+      "peak_mb": 10.96,
+      "perplexity": 2.9507,
+      "delta_ppl": 0.0,
+      "tokens_per_sec": 76.12,
+      "match_rate": 1.0
+    },
+    {
+      "config": "kv-only",
+      "peak_mb": 59.95,
+      "perplexity": 2.9507,
+      "delta_ppl": 0.0,
+      "tokens_per_sec": 12.11,
+      "match_rate": 0.0396
+    },
+    {
+      "config": "kv+hidden8",
+      "peak_mb": 4.0,
+      "perplexity": 2.9507,
+      "delta_ppl": 0.0,
+      "tokens_per_sec": 14.66,
+      "match_rate": 0.0396
+    },
+    {
+      "config": "kv+hidden6",
+      "peak_mb": 1.0,
+      "perplexity": 2.9507,
+      "delta_ppl": 0.0,
+      "tokens_per_sec": 14.16,
+      "match_rate": 0.0396
+    },
+    {
+      "config": "kv+ffn8",
+      "peak_mb": 1.2,
+      "perplexity": 2.9507,
+      "delta_ppl": 0.0,
+      "tokens_per_sec": 15.25,
+      "match_rate": 0.0396
+    },
+    {
+      "config": "all8",
+      "peak_mb": 1.28,
+      "perplexity": 2.9507,
+      "delta_ppl": 0.0,
+      "tokens_per_sec": 15.88,
+      "match_rate": 0.0396
+    },
+    {
+      "config": "all6",
+      "peak_mb": -0.79,
+      "perplexity": 2.9507,
+      "delta_ppl": 0.0,
+      "tokens_per_sec": 14.62,
+      "match_rate": 0.0396
+    },
+    {
+      "config": "aggressive",
+      "peak_mb": 0.31,
+      "perplexity": 2.9507,
+      "delta_ppl": 0.0,
+      "tokens_per_sec": 14.8,
+      "match_rate": 0.0099
+    }
+  ]
+}

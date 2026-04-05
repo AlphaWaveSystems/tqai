@@ -64,5 +64,8 @@ class MLXOps:
     def int64(self, x):
         return x.astype(mx.int64)
 
+    def int8(self, x):
+        return x.astype(mx.int8)
+
     def sign(self, x):
         return mx.sign(x)

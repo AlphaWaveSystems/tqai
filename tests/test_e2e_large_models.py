@@ -22,7 +22,7 @@ class TestMLXLargeModels:
         "qwen-3b-q8": ("mlx-community/Qwen2.5-3B-Instruct-8bit", "3B Q8"),
         "qwen-3b-q4": ("mlx-community/Qwen2.5-3B-Instruct-4bit", "3B Q4"),
         "llama-8b-q4": ("mlx-community/Llama-3.1-8B-Instruct-4bit", "8B Q4"),
-        "llama-8b-q8": ("mlx-community/Llama-3.1-8B-Instruct-8bit", "8B Q8"),
+        "qwen-7b-q8": ("mlx-community/Qwen2.5-7B-Instruct-8bit", "7B Q8"),
         "qwen-14b-q4": ("mlx-community/Qwen2.5-14B-Instruct-4bit", "14B Q4"),
     }
 

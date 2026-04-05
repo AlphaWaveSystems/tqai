@@ -1,0 +1,71 @@
+{
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "backend": "torch",
+  "timestamp": "2026-04-04T17:02:10",
+  "results": [
+    {
+      "config": "baseline",
+      "peak_mb": 1799.29,
+      "perplexity": 4.358,
+      "delta_ppl": 0.0,
+      "tokens_per_sec": 70.22,
+      "match_rate": 1.0
+    },
+    {
+      "config": "kv-only",
+      "peak_mb": 4.8,
+      "perplexity": 4.358,
+      "delta_ppl": 0.0,
+      "tokens_per_sec": 42.51,
+      "match_rate": 1.0
+    },
+    {
+      "config": "kv+hidden8",
+      "peak_mb": 2.97,
+      "perplexity": 4.358,
+      "delta_ppl": 0.0,
+      "tokens_per_sec": 71.02,
+      "match_rate": 1.0
+    },
+    {
+      "config": "kv+hidden6",
+      "peak_mb": 2.1,
+      "perplexity": 4.358,
+      "delta_ppl": 0.0,
+      "tokens_per_sec": 41.81,
+      "match_rate": 1.0
+    },
+    {
+      "config": "kv+ffn8",
+      "peak_mb": 1142.59,
+      "perplexity": 4.3561,
+      "delta_ppl": -0.0019,
+      "tokens_per_sec": 35.72,
+      "match_rate": 0.3116
+    },
+    {
+      "config": "all8",
+      "peak_mb": 0.44,
+      "perplexity": 4.3561,
+      "delta_ppl": -0.0019,
+      "tokens_per_sec": 29.37,
+      "match_rate": 0.3116
+    },
+    {
+      "config": "all6",
+      "peak_mb": 0.0,
+      "perplexity": 4.3794,
+      "delta_ppl": 0.0214,
+      "tokens_per_sec": 35.43,
+      "match_rate": 0.3043
+    },
+    {
+      "config": "aggressive",
+      "peak_mb": 281.79,
+      "perplexity": 4.3794,
+      "delta_ppl": 0.0214,
+      "tokens_per_sec": 32.22,
+      "match_rate": 0.3043
+    }
+  ]
+}

@@ -42,6 +42,9 @@ class TurboQuantDynamicCache(DynamicCache):
                 bits=bits,
                 seed=self.tq_config.seed + layer_idx + (0 if is_key else 10000),
                 ops=self._ops,
+                pre_rotated=self.tq_config.pre_rotated,
+                use_qjl=self.tq_config.use_qjl,
+                qjl_sketch_size=self.tq_config.qjl_sketch_size,
             )
         return store[layer_idx]
 
@@ -91,10 +94,10 @@ class TurboQuantDynamicCache(DynamicCache):
         if key_states.shape[2] > 0:
             k_quant = self._get_quantizer(layer_idx, head_dim, is_key=True)
             v_quant = self._get_quantizer(layer_idx, head_dim, is_key=False)
-            k_indices, k_norms = k_quant.quantize(key_states)
-            v_indices, v_norms = v_quant.quantize(value_states)
-            self._compressed_keys[layer_idx].append((k_indices, k_norms))
-            self._compressed_values[layer_idx].append((v_indices, v_norms))
+            k_result = k_quant.quantize(key_states)
+            v_result = v_quant.quantize(value_states)
+            self._compressed_keys[layer_idx].append(k_result)
+            self._compressed_values[layer_idx].append(v_result)
 
         self._tokens_seen[layer_idx] += new_tokens
 
@@ -117,8 +120,10 @@ class TurboQuantDynamicCache(DynamicCache):
         if compressed:
             head_dim = compressed[0][0].shape[-1]
             quant = self._get_quantizer(layer_idx, head_dim, is_key)
-            for indices, norms in compressed:
-                parts.append(quant.dequantize(indices, norms))
+            for entry in compressed:
+                indices, norms = entry[0], entry[1]
+                qjl_data = entry[2] if len(entry) > 2 else None
+                parts.append(quant.dequantize(indices, norms, qjl_data))
 
         if not parts:
             return torch.empty(0)

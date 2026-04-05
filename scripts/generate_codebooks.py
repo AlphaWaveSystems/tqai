@@ -17,7 +17,7 @@ from tqai.codebook.lloyd_max import solve_lloyd_max
 import numpy as np
 
 HEAD_DIMS = [64, 96, 128, 256]
-BITS = [2, 3, 4]
+BITS = [2, 3, 4, 6, 8]  # 6-bit and 8-bit added for v0.2 forward-pass compression
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "src" / "tqai" / "codebook" / "data"
 
