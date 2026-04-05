@@ -27,12 +27,18 @@ class TurboQuantMLXCache:
             bits=config.bits_k,
             seed=config.seed,
             ops=self._ops,
+            pre_rotated=config.pre_rotated,
+            use_qjl=config.use_qjl,
+            qjl_sketch_size=config.qjl_sketch_size,
         )
         self._v_quantizer = PolarQuantizer(
             head_dim=head_dim,
             bits=config.bits_v,
             seed=config.seed + 10000,
             ops=self._ops,
+            pre_rotated=config.pre_rotated,
+            use_qjl=config.use_qjl,
+            qjl_sketch_size=config.qjl_sketch_size,
         )
 
         self._compressed_keys: list[tuple[Any, Any]] = []
@@ -81,10 +87,8 @@ class TurboQuantMLXCache:
 
         # Compress remaining
         if keys.shape[2] > 0:
-            k_idx, k_norm = self._k_quantizer.quantize(keys)
-            v_idx, v_norm = self._v_quantizer.quantize(values)
-            self._compressed_keys.append((k_idx, k_norm))
-            self._compressed_values.append((v_idx, v_norm))
+            self._compressed_keys.append(self._k_quantizer.quantize(keys))
+            self._compressed_values.append(self._v_quantizer.quantize(values))
 
         self.offset += new_seq
 
@@ -107,8 +111,10 @@ class TurboQuantMLXCache:
         parts = []
         if sink is not None:
             parts.append(sink)
-        for indices, norms in compressed:
-            parts.append(quantizer.dequantize(indices, norms))
+        for entry in compressed:
+            indices, norms = entry[0], entry[1]
+            qjl_data = entry[2] if len(entry) > 2 else None
+            parts.append(quantizer.dequantize(indices, norms, qjl_data))
 
         if not parts:
             return mx.zeros((1, self.n_kv_heads, 0, self.head_dim))

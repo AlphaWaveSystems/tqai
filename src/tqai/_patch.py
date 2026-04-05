@@ -4,7 +4,43 @@ from tqai.backend import detect_backend
 from tqai.config import TurboQuantConfig
 
 
+def _detect_baked_config(model) -> dict | None:
+    """Check model config directory for tqai_bake_config.json.
+
+    Returns parsed dict if found, else None.
+    """
+    import json
+    from pathlib import Path
+
+    config = getattr(model, "config", None)
+    if config is None:
+        return None
+    name_or_path = getattr(config, "_name_or_path", None)
+    if not name_or_path:
+        return None
+    bake_cfg_path = Path(name_or_path) / "tqai_bake_config.json"
+    if not bake_cfg_path.exists():
+        return None
+    try:
+        return json.loads(bake_cfg_path.read_text())
+    except Exception:
+        return None
+
+
 def _patch(model, config: TurboQuantConfig):
+    # Auto-detect rotation-baked model
+    baked = _detect_baked_config(model)
+    if baked and baked.get("tqai_baked"):
+        if not config.pre_rotated:
+            config.pre_rotated = True
+        # Respect baked bits/seed if caller didn't override them explicitly
+        if config.bits_k == 4 and "bits_k" in baked:
+            config.bits_k = baked["bits_k"]
+        if config.bits_v == 2 and "bits_v" in baked:
+            config.bits_v = baked["bits_v"]
+        if config.seed == 42 and "seed" in baked:
+            config.seed = baked["seed"]
+
     detected = config.backend or detect_backend()
 
     if detected == "mlx":

@@ -75,6 +75,8 @@ def cmd_run(args):
     compress_ffn = getattr(args, "compress_ffn", False)
     bits_hidden = getattr(args, "bits_hidden", 8)
     bits_ffn = getattr(args, "bits_ffn", 8)
+    use_qjl = getattr(args, "use_qjl", False)
+    qjl_sketch_size = getattr(args, "qjl_sketch_size", 64)
     if getattr(args, "compress_all", False):
         compress_hidden = True
         compress_ffn = True
@@ -106,6 +108,7 @@ def cmd_run(args):
             model_id, prompt, bits_k, bits_v, max_tokens, no_tqai, backend, tqai_config,
             compress_hidden=compress_hidden, compress_ffn=compress_ffn,
             bits_hidden=bits_hidden, bits_ffn=bits_ffn,
+            use_qjl=use_qjl, qjl_sketch_size=qjl_sketch_size,
         )
 
 
@@ -137,6 +140,7 @@ def _run_mlx(model_id, prompt, bits_k, bits_v, max_tokens, no_tqai, tqai_config=
 def _run_hf(
     model_id, prompt, bits_k, bits_v, max_tokens, no_tqai, backend, tqai_config=None,
     compress_hidden=False, compress_ffn=False, bits_hidden=8, bits_ffn=8,
+    use_qjl=False, qjl_sketch_size=64,
 ):
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -162,6 +166,7 @@ def _run_hf(
             config_path=tqai_config,
             compress_hidden=compress_hidden, bits_hidden=bits_hidden,
             compress_ffn=compress_ffn, bits_ffn=bits_ffn,
+            use_qjl=use_qjl, qjl_sketch_size=qjl_sketch_size,
         )
 
     inputs = tokenizer(prompt, return_tensors="pt")
@@ -246,6 +251,41 @@ def cmd_compare(args):
         cache = tqai.patch(model, bits_k=bits_k, bits_v=bits_v, backend="torch")
         output = model.generate(**inputs, past_key_values=cache, max_new_tokens=max_tokens, do_sample=False)
         print(tokenizer.decode(output[0], skip_special_tokens=True))
+
+
+def cmd_bake(args):
+    """Bake rotation matrices into model weights and save as HuggingFace model."""
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    try:
+        import torch
+    except ImportError as e:
+        raise SystemExit("tqai bake requires PyTorch") from e
+
+    model_id = args.model
+    output_dir = args.output
+    bits_k = args.bits_k
+    bits_v = args.bits_v
+    seed = args.seed
+
+    print(f"Loading {model_id}...")
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.float32)
+    model.train(False)
+
+    from tqai.bake import save_baked_model
+
+    out_path = save_baked_model(
+        model=model,
+        tokenizer=tokenizer,
+        output_dir=output_dir,
+        base_model_id=model_id,
+        bits_k=bits_k,
+        bits_v=bits_v,
+        seed=seed,
+    )
+    print(f"\nBaked model saved to: {out_path}")
+    print(f"Usage: tqai run 'prompt' -m {out_path}")
 
 
 def cmd_convert(args):
@@ -383,6 +423,10 @@ def main():
                      help="Bits for hidden state compression (default: 8)")
     run.add_argument("--bits-ffn", type=int, default=8,
                      help="Bits for FFN compression (default: 8)")
+    run.add_argument("--use-qjl", action="store_true",
+                     help="Enable QJL Stage 2 residual sketch (research/non-softmax use only)")
+    run.add_argument("--qjl-sketch-size", type=int, default=64,
+                     help="Number of 1-bit JL projections for QJL (default: 64)")
 
     # compare
     comp = sub.add_parser("compare", help="Compare baseline vs tqai output side by side")
@@ -391,6 +435,14 @@ def main():
     comp.add_argument("--bits-k", type=int, default=4, help="Key bits (default: 4)")
     comp.add_argument("--bits-v", type=int, default=2, help="Value bits (default: 2)")
     comp.add_argument("--max-tokens", type=int, default=100, help="Max tokens (default: 100)")
+
+    # bake
+    bake = sub.add_parser("bake", help="Bake rotation matrices into model weights (eliminates runtime rotation)")
+    bake.add_argument("--model", "-m", required=True, help="HuggingFace model ID or local path")
+    bake.add_argument("--output", "-o", required=True, help="Output directory for baked model")
+    bake.add_argument("--bits-k", type=int, default=4, help="Key bits (default: 4)")
+    bake.add_argument("--bits-v", type=int, default=2, help="Value bits (default: 2)")
+    bake.add_argument("--seed", type=int, default=42, help="RNG seed (default: 42)")
 
     # convert
     conv = sub.add_parser("convert", help="Pre-convert a model for faster tqai inference")
@@ -410,6 +462,8 @@ def main():
         cmd_run(args)
     elif args.command == "compare":
         cmd_compare(args)
+    elif args.command == "bake":
+        cmd_bake(args)
     elif args.command == "convert":
         cmd_convert(args)
     else:

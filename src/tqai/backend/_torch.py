@@ -63,5 +63,8 @@ class TorchOps:
     def int64(self, x):
         return x.long()
 
+    def int8(self, x):
+        return x.to(torch.int8)
+
     def sign(self, x):
         return torch.sign(x)

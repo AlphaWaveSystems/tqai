@@ -22,6 +22,10 @@ def patch(
     bits_ffn: int = 8,
     compress_attn_logits: bool = False,
     bits_attn: int = 8,
+    # Rotation baking + QJL (v0.3)
+    pre_rotated: bool = False,
+    use_qjl: bool = False,
+    qjl_sketch_size: int = 64,
 ):
     """Enable TurboQuant compression on a model.
 
@@ -46,6 +50,13 @@ def patch(
         bits_ffn: Bits for FFN input compression (default 8).
         compress_attn_logits: Reserved for future use (attention logit compression).
         bits_attn: Bits for attention logit compression (default 8).
+        pre_rotated: If True, skip rotation in PolarQuantizer (use when model weights
+            have been baked via ``tqai bake``). Auto-detected if ``tqai_bake_config.json``
+            is present in the model directory.
+        use_qjl: If True, enable QJL Stage 2 residual sketch (default False).
+            Adds a 1-bit JL sketch to each KV token for inner-product bias correction.
+            NOTE: degrades softmax attention on average; use for research only.
+        qjl_sketch_size: Number of 1-bit JL projections (default 64).
 
     Returns:
         For HuggingFace: a ``TurboQuantDynamicCache`` to pass as ``past_key_values``.
@@ -75,6 +86,9 @@ def patch(
         bits_ffn=bits_ffn,
         compress_attn_logits=compress_attn_logits,
         bits_attn=bits_attn,
+        pre_rotated=pre_rotated,
+        use_qjl=use_qjl,
+        qjl_sketch_size=qjl_sketch_size,
     )
     return _patch(model, config)
 
