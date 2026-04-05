@@ -1,13 +1,17 @@
 """Forward hook manager for full transformer forward pass compression.
 
-Attaches PyTorch forward hooks to attention and FFN modules to compress
-hidden states and intermediate activations during inference.
+Attaches hooks to attention and FFN modules to compress hidden states and
+intermediate activations during inference.  Supports both PyTorch
+(``register_forward_pre_hook``) and MLX (``__call__`` monkey-patching).
 
-Compression is quantize-then-dequantize: tensors are stored in compressed
-form internally but reconstructed before being used. This reduces peak
-memory during long forward passes, at the cost of quantization noise.
+Compression is quantize-then-dequantize: tensors are compressed then
+immediately reconstructed, reducing peak memory at the cost of quantization
+noise.  Architecture-agnostic: works by detecting module patterns, not
+class names.
 
-Architecture-agnostic: works by detecting module patterns, not class names.
+References:
+    - TurboQuant: arXiv:2504.19874
+    - PolarQuant: arXiv:2502.02617
 """
 
 from __future__ import annotations
@@ -140,3 +144,127 @@ class ForwardCompressionHooks:
     def num_hooks(self) -> int:
         """Number of active hook handles."""
         return len(self._handles)
+
+
+class _MLXCompressedWrapper:
+    """Thin wrapper that compresses the first argument before delegation.
+
+    Python's special method lookup for ``__call__`` bypasses instance
+    attributes and goes to the type.  So patching ``module.__call__``
+    on an instance does NOT intercept ``parent.child(x)``.  Instead, we
+    replace the child attribute on the parent with this wrapper object
+    whose ``__call__`` IS on its type and therefore fires correctly.
+
+    All other attribute access is forwarded to the original module.
+    """
+
+    def __init__(self, original, compress_fn):
+        object.__setattr__(self, "_original", original)
+        object.__setattr__(self, "_compress", compress_fn)
+
+    def __call__(self, x, *args, **kwargs):
+        if hasattr(x, "shape") and len(x.shape) >= 2 and x.shape[-1] >= 8:
+            x = self._compress(x)
+        return self._original(x, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._original, name)
+
+
+class MLXForwardCompressionHooks:
+    """Forward compression for MLX models via module replacement.
+
+    MLX's ``mx.nn.Module`` has no ``register_forward_pre_hook``, so we
+    replace target modules (attention, FFN) on their parent layers with
+    :class:`_MLXCompressedWrapper` instances that compress the first
+    argument before delegating to the original.
+
+    On detach, the original modules are restored.
+    """
+
+    def __init__(self, config: ForwardHookConfig):
+        self._config = config
+        # (parent, attr_name, original_module) for each patched module
+        self._patches: list[tuple[Any, str, Any]] = []
+        self._quantizers: dict[int, dict[str, Any]] = {}
+
+    def attach(self, model) -> None:
+        """Walk model and wrap attention/FFN modules."""
+        from tqai.module_utils import is_attention, is_ffn, iter_transformer_layers
+
+        for _layer_name, layer in iter_transformer_layers(model):
+            # Use children() for MLX modules, named_modules() fallback
+            if hasattr(layer, "children"):
+                child_names = layer.children()
+            else:
+                child_names = [
+                    n for n, _ in layer.named_modules() if n
+                ]
+
+            for attr_name in child_names:
+                child = getattr(layer, attr_name, None)
+                if child is None:
+                    continue
+
+                if (self._config.compress_hidden or self._config.compress_attn_logits) \
+                        and is_attention(child):
+                    self._wrap_child(
+                        layer, attr_name, child,
+                        "hidden", self._config.bits_hidden,
+                    )
+                elif self._config.compress_ffn and is_ffn(child):
+                    self._wrap_child(
+                        layer, attr_name, child,
+                        "ffn_in", self._config.bits_ffn,
+                    )
+
+    def detach(self) -> None:
+        """Restore original modules."""
+        for parent, attr_name, original in self._patches:
+            setattr(parent, attr_name, original)
+        self._patches.clear()
+        self._quantizers.clear()
+
+    def _wrap_child(self, parent, attr_name, child, key, bits):
+        mod_id = id(child)
+        hooks_self = self
+
+        def compress_fn(x):
+            return hooks_self._compress_tensor(x, mod_id, key, bits)
+
+        wrapper = _MLXCompressedWrapper(child, compress_fn)
+        setattr(parent, attr_name, wrapper)
+        self._patches.append((parent, attr_name, child))
+
+    def _get_quantizer(self, module_id: int, key: str, dim: int, bits: int):
+        from tqai.backend import get_backend
+        from tqai.quantizer import PolarQuantizer
+
+        if module_id not in self._quantizers:
+            self._quantizers[module_id] = {}
+        cache = self._quantizers[module_id]
+        if key not in cache:
+            ops = get_backend("mlx")
+            cache[key] = PolarQuantizer(
+                head_dim=dim, bits=bits, seed=self._config.seed, ops=ops
+            )
+        return cache[key]
+
+    def _compress_tensor(self, x, module_id: int, key: str, bits: int):
+        import mlx.core as mx
+
+        orig_dtype = x.dtype
+        orig_shape = x.shape
+        dim = orig_shape[-1]
+        x_2d = x.reshape(-1, dim).astype(mx.float32)
+
+        pq = self._get_quantizer(module_id, key, dim, bits)
+        indices, norms = pq.quantize(x_2d)
+        x_hat = pq.dequantize(indices, norms)
+
+        return x_hat.reshape(orig_shape).astype(orig_dtype)
+
+    @property
+    def num_hooks(self) -> int:
+        """Number of wrapped modules."""
+        return len(self._patches)

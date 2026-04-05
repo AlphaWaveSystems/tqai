@@ -32,6 +32,10 @@ class TurboQuantConfig:
     cache_strategy: str = "auto"  # "auto"|"incremental"|"residual"|"full"
     residual_window: int = 128  # tokens to keep uncompressed (residual strategy)
 
+    # Chunked attention (v0.4.0)
+    chunk_attention: bool = False
+    attention_chunk_size: int = 4096
+
     _VALID_STRATEGIES = {"auto", "incremental", "residual", "full"}
 
     def __post_init__(self):

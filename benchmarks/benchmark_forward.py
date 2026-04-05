@@ -143,10 +143,7 @@ def _run_mlx_config(model, tokenizer, cfg_kwargs: dict, baseline_tokens: Optiona
     mem_before = _rss_mb()
 
     if not no_tqai:
-        # Forward hooks not yet supported on MLX (Phase 4)
-        patch_kw = {k: v for k, v in cfg_kwargs.items()
-                    if k not in ("no_tqai", "compress_hidden", "compress_ffn",
-                                 "compress_attn_logits", "bits_hidden", "bits_ffn", "bits_attn")}
+        patch_kw = {k: v for k, v in cfg_kwargs.items() if k != "no_tqai"}
         tqai.patch(model, backend="mlx", **patch_kw)
 
     perp_mod = _load_perp_mod()

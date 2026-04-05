@@ -28,12 +28,15 @@ def patch(
     # Cache strategy (v0.3.1)
     cache_strategy: str = "auto",
     residual_window: int = 128,
+    # Chunked attention (v0.4.0)
+    chunk_attention: bool = False,
+    attention_chunk_size: int = 4096,
 ):
     """Enable TurboQuant compression on a model.
 
     KV cache compression works with both PyTorch (HuggingFace) and MLX backends.
-    Forward-pass activation compression (``compress_hidden``, ``compress_ffn``,
-    ``compress_attn_logits``) is currently supported for PyTorch only.
+    Forward-pass activation compression (``compress_hidden``, ``compress_ffn``)
+    is supported on both PyTorch and MLX.
 
     Args:
         model: HuggingFace model or mlx-lm model.
@@ -46,9 +49,9 @@ def patch(
             (from ``tqai convert``). When provided, ``bits_k`` and ``bits_v``
             are read from the saved config.
         compress_hidden: Compress residual stream (hidden states) entering
-            each attention and FFN block. PyTorch only.
+            each attention and FFN block.
         bits_hidden: Bits for hidden state compression (default 8).
-        compress_ffn: Compress hidden states entering FFN/MLP blocks. PyTorch only.
+        compress_ffn: Compress hidden states entering FFN/MLP blocks.
         bits_ffn: Bits for FFN input compression (default 8).
         compress_attn_logits: Reserved for future use (attention logit compression).
         bits_attn: Bits for attention logit compression (default 8).
@@ -96,6 +99,8 @@ def patch(
         qjl_sketch_size=qjl_sketch_size,
         cache_strategy=cache_strategy,
         residual_window=residual_window,
+        chunk_attention=chunk_attention,
+        attention_chunk_size=attention_chunk_size,
     )
     return _patch(model, config)
 
