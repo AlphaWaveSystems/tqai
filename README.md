@@ -88,17 +88,18 @@ All results measured on Apple Silicon (MLX). Full data in [`benchmarks/results/`
 
 Δppl = 0.00 on **40 benchmark runs** (5 models × 8 compression configs).
 
-### Throughput (MLX, v0.2 — Python-level overhead, Metal kernel planned for v0.3)
+### Throughput (MLX, v0.3.1 — fused Metal kernels + incremental cache)
 
-| Model | Baseline | kv-only | Retention | Note |
-|-------|---------|---------|-----------|------|
-| Qwen2.5-0.5B bf16 | 326 tok/s | 34 tok/s | 10% | Small model, fastest baseline |
-| Qwen2.5-3B bf16 | 72 tok/s | 19 tok/s | 26% | bf16 KV tensors are large |
-| Llama-3.1-8B Q4 | 103 tok/s | 22 tok/s | 22% | Fast Q4 matmul → overhead prominent |
-| **Qwen2.5-7B Q8** | 63 tok/s | 24 tok/s | **38%** | Compute-heavy model absorbs overhead |
-| Qwen2.5-14B Q4 | 56 tok/s | 14 tok/s | 25% | At 14B, aggressive config is free |
+| Model | Baseline | kv-only | Retention | vs v0.2 |
+|-------|---------|---------|-----------|---------|
+| Qwen2.5-0.5B bf16 | 326 tok/s | **118 tok/s** | **36%** | was 10% |
+| Qwen2.5-3B bf16 | 71 tok/s | **66 tok/s** | **93%** | was 26% |
+| Llama-3.1-8B Q4 | 102 tok/s | **85 tok/s** | **84%** | was 22% |
+| **Qwen2.5-7B Q8** | 63 tok/s | **59 tok/s** | **93%** | was 38% |
+| Qwen2.5-14B Q4 | 56 tok/s | **50 tok/s** | **89%** | was 25% |
+| Gemma 4 E4B Q4 | 113 tok/s | **47 tok/s** | **41%** | new |
 
-Throughput overhead is fully Python-level (rotation matmul per token). A Metal/CUDA kernel is planned for v0.3 to eliminate it, targeting near-baseline throughput.
+v0.3.1 eliminated the O(n²) per-token reconstruction overhead via an incremental dequantized buffer ([KIVI](https://arxiv.org/abs/2402.02750)-inspired). Fused Metal kernels (`mx.fast.metal_kernel`) handle quantize/dequantize in single GPU dispatches. Larger models (3B+) now retain **84–93%** of baseline throughput.
 
 ---
 
@@ -135,6 +136,29 @@ tqai implements PolarQuant — the core of TurboQuant Stage 1 — via three step
 3. **Norm preservation** — Stores the vector norm separately in FP16 for lossless magnitude reconstruction
 
 No training, calibration, or model-specific tuning required. Fully data-oblivious — the same codebooks work for any model.
+
+### Cache Strategies (v0.3.1)
+
+tqai supports three cache reconstruction strategies to balance speed and quality:
+
+| Strategy | Per-token cost | Quality | Use case |
+|----------|---------------|---------|----------|
+| `incremental` (default) | O(1) | Same as full | Production — 2–3x faster than v0.2 |
+| `residual` | O(1) | Better (recent tokens exact) | Quality-sensitive, long context |
+| `full` | O(n) | Baseline | Debugging, compatibility |
+
+```python
+# Use residual strategy — last 128 tokens kept uncompressed (KIVI-style)
+tqai.patch(model, bits_k=4, bits_v=2, cache_strategy="residual", residual_window=128)
+```
+
+### Codebook Solvers (v0.3.1)
+
+Beyond the default Lloyd-Max solver, tqai offers evolutionary and fuzzy codebook optimizers for build-time codebook generation:
+
+- **CMA-ES** ([arXiv:1710.05311](https://arxiv.org/abs/1710.05311)) — Evolutionary refinement of Lloyd-Max codebooks, ~0.5% MSE improvement
+- **Fuzzy C-means** ([arXiv:1908.05033](https://arxiv.org/abs/1908.05033)) — Soft assignment with temperature annealing
+- **Attention-aware objective** ([arXiv:2402.14866](https://arxiv.org/abs/2402.14866)) — Optimizes codebooks to preserve softmax attention scores rather than raw MSE
 
 ### QJL Stage 2 (opt-in)
 
@@ -190,6 +214,8 @@ cache = tqai.patch(
     device="cuda",         # PyTorch device (ignored for MLX)
     use_qjl=False,         # Enable QJL Stage 2 residual correction (research)
     qjl_sketch_size=64,    # JL sketch dimension (tradeoff: quality vs memory)
+    cache_strategy="auto", # "auto" (incremental), "residual", or "full"
+    residual_window=128,   # Recent tokens kept uncompressed (residual strategy)
 )
 ```
 
@@ -201,7 +227,7 @@ cache = tqai.patch(
 # Install dev dependencies
 pip install tqai[dev]
 
-# Unit + accuracy tests (~247 tests, <10s)
+# Unit + accuracy tests (~293 tests, <40s)
 pytest tests/ --ignore=tests/test_e2e_models.py --ignore=tests/test_e2e_large_models.py
 
 # End-to-end with real models (requires model downloads)
@@ -220,15 +246,16 @@ src/tqai/
 ├── __init__.py          # patch(), unpatch(), TurboQuantConfig
 ├── config.py            # Configuration dataclass
 ├── quantizer.py         # PolarQuantizer (core algorithm + QJL Stage 2)
+├── kernels/             # Fused Metal GPU kernels (quantize + dequantize)
 ├── hooks.py             # Forward-pass activation compression hooks
 ├── module_utils.py      # Transformer layer inspection utilities
 ├── backend/             # PyTorch + MLX abstraction layer
-├── codebook/            # Lloyd-Max codebooks (2–8 bit, dims 64/96/128/256)
+├── codebook/            # Codebook solvers (Lloyd-Max, CMA-ES, fuzzy) + precomputed data
 └── cache/               # HuggingFace DynamicCache + mlx-lm KVCache integrations
 
 benchmarks/
 ├── benchmark_forward.py # KV + activation compression throughput benchmark
-├── benchmark_bake.py    # Rotation baking vs runtime throughput benchmark
+├── benchmark_metal.py   # Metal kernel vs Python path microbenchmark
 ├── eval_perplexity.py   # Perplexity evaluation helper
 └── results/             # Benchmark JSON results + FINDINGS.md
 ```
@@ -246,6 +273,11 @@ This library implements the TurboQuant algorithm from Google Research:
 Related work:
 - [PolarQuant](https://arxiv.org/abs/2502.02617) (AISTATS 2026) — Random rotation + polar coordinate quantization (the core of tqai)
 - [QJL](https://dl.acm.org/doi/10.1609/aaai.v39i24.34773) (AAAI 2025) — Quantized Johnson-Lindenstrauss residual correction (available in tqai as `use_qjl=True`)
+- [KIVI](https://arxiv.org/abs/2402.02750) (ICML 2024) — Residual buffer strategy for KV cache compression
+- [KVQuant](https://arxiv.org/abs/2401.18079) (NeurIPS 2024) — Fused dequant-attention kernel design
+- [APTQ](https://arxiv.org/abs/2402.14866) (2024) — Attention-aware post-training quantization (attention-aware codebook objective)
+- [DSQ](https://arxiv.org/abs/1908.05033) (2019) — Differentiable soft quantization (fuzzy codebook solver)
+- [IDE-LBG](https://arxiv.org/abs/1710.05311) (2017) — Evolutionary codebook optimization (CMA-ES solver)
 
 ---
 

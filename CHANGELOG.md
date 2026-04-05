@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-04-05
+
+### Added
+
+- **Incremental cache buffer** — O(1) per-token dequantization instead of O(n) full reconstruction. Default strategy (`cache_strategy="auto"`). Inspired by KIVI (arXiv:2402.02750).
+- **Residual cache strategy** — KIVI-style: last `residual_window` tokens kept uncompressed, older tokens compressed into incremental buffer. Zero quantization error on recent tokens. (`cache_strategy="residual"`)
+- **Fused Metal GPU kernels** — Quantize and dequantize fused into single GPU dispatches via `mx.fast.metal_kernel()` (MLX >= 0.16). Eliminates Python dispatch overhead for the codebook search step.
+- **CMA-ES codebook solver** — Evolutionary optimization of codebook centroids using Covariance Matrix Adaptation (arXiv:1710.05311). ~0.5% MSE improvement over Lloyd-Max. Requires `cma>=3.0` (optional `codegen` dependency).
+- **Fuzzy C-means codebook solver** — Soft assignment with temperature annealing (arXiv:1908.05033). Smoother optimization landscape, avoids local optima.
+- **Attention-aware codebook objective** — Optimizes codebooks to preserve softmax attention scores rather than raw MSE (inspired by APTQ, arXiv:2402.14866).
+- **Codebook solver dispatcher** — Unified `solve_codebook()` entry point supporting `lloyd_max`, `cmaes`, `fuzzy`, or `auto` selection.
+- **Gemma 4 support** — Updated model detection to handle composite models (Gemma 4's `language_model` wrapper).
+- Metal kernel tests (26 tests) and cache strategy tests
+
+### Changed
+
+- `TurboQuantConfig` adds `cache_strategy` and `residual_window` fields
+- `patch()` accepts `cache_strategy` and `residual_window` parameters
+- `MLXOps` adds `quantize_fused()` and `dequantize_fused()` methods
+- `PolarQuantizer` auto-dispatches to Metal kernels when available
+- Codebook registry runtime fallback uses solver dispatcher
+- Test suite expanded to 293 tests (up from 264)
+- Version bumped to 0.3.1
+
+### Benchmark results (MLX, Apple Silicon)
+
+**Throughput improvement (v0.2 → v0.3.1):**
+
+| Model | v0.2 kv-only | v0.3.1 kv-only | Speedup |
+|-------|-------------|----------------|---------|
+| Qwen2.5-0.5B bf16 | 33 tok/s (10%) | 118 tok/s (36%) | **3.6x** |
+| Qwen2.5-3B bf16 | 21 tok/s (30%) | 66 tok/s (93%) | **3.1x** |
+| Llama-3.1-8B Q4 | 31 tok/s (30%) | 85 tok/s (84%) | **2.7x** |
+| Qwen2.5-7B Q8 | 26 tok/s (42%) | 59 tok/s (93%) | **2.3x** |
+| Qwen2.5-14B Q4 | 20 tok/s (35%) | 50 tok/s (89%) | **2.5x** |
+| Gemma 4 E4B Q4 | — | 47 tok/s (41%) | new |
+
+Perplexity: Δppl = 0.00 across all models and configs (unchanged from v0.2).
+
 ## [0.2.0] - 2026-04-05
 
 ### Added

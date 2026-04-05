@@ -28,6 +28,10 @@ class TurboQuantConfig:
     use_qjl: bool = False
     qjl_sketch_size: int = 64
 
+    # Cache strategy (v0.3.1)
+    cache_strategy: str = "auto"  # "auto"|"incremental"|"residual"|"full"
+    residual_window: int = 128  # tokens to keep uncompressed (residual strategy)
+
     @property
     def has_forward_compression(self) -> bool:
         """True if any forward-pass compression is enabled."""

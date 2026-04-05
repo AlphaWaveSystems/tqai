@@ -69,3 +69,17 @@ class MLXOps:
 
     def sign(self, x):
         return mx.sign(x)
+
+    # ------------------------------------------------------------------
+    # Fused Metal kernel dispatch (Metal-specific, not on BackendOps)
+    # ------------------------------------------------------------------
+
+    def quantize_fused(self, x, rotation, centroids):
+        from tqai.kernels import metal_quantize
+
+        return metal_quantize(x, rotation, centroids)
+
+    def dequantize_fused(self, indices, norms, rotation, centroids):
+        from tqai.kernels import metal_dequantize
+
+        return metal_dequantize(indices, norms, rotation, centroids)
