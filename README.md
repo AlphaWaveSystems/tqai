@@ -92,11 +92,11 @@ All results measured on Apple Silicon (MLX). Full data in [`benchmarks/results/`
 
 | Model | Baseline | kv-only | Retention | Note |
 |-------|---------|---------|-----------|------|
-| Qwen2.5-0.5B bf16 | 325 tok/s | 31 tok/s | 9% | Small model, fastest baseline |
-| Qwen2.5-3B bf16 | 66 tok/s | 10 tok/s | 15% | bf16 KV tensors are large |
-| Llama-3.1-8B Q4 | 76 tok/s | 12 tok/s | 16% | Fast Q4 matmul → overhead prominent |
-| **Qwen2.5-7B Q8** | 63 tok/s | 23 tok/s | **37%** | Compute-heavy model absorbs overhead |
-| Qwen2.5-14B Q4 | 36 tok/s | 14 tok/s | 39% | At 14B, aggressive config is free |
+| Qwen2.5-0.5B bf16 | 326 tok/s | 34 tok/s | 10% | Small model, fastest baseline |
+| Qwen2.5-3B bf16 | 72 tok/s | 19 tok/s | 26% | bf16 KV tensors are large |
+| Llama-3.1-8B Q4 | 103 tok/s | 22 tok/s | 22% | Fast Q4 matmul → overhead prominent |
+| **Qwen2.5-7B Q8** | 63 tok/s | 24 tok/s | **38%** | Compute-heavy model absorbs overhead |
+| Qwen2.5-14B Q4 | 56 tok/s | 14 tok/s | 25% | At 14B, aggressive config is free |
 
 Throughput overhead is fully Python-level (rotation matmul per token). A Metal/CUDA kernel is planned for v0.3 to eliminate it, targeting near-baseline throughput.
 
