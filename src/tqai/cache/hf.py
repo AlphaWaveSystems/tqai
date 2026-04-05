@@ -146,8 +146,6 @@ class TurboQuantDynamicCache(DynamicCache):
         v_quant = self._get_quantizer(layer_idx, head_dim, is_key=False)
         k_entry = k_quant.quantize(key_states)
         v_entry = v_quant.quantize(value_states)
-        self._compressed_keys[layer_idx].append(k_entry)
-        self._compressed_values[layer_idx].append(v_entry)
 
         k_dequant = self._dequant_entry(k_quant, k_entry)
         v_dequant = self._dequant_entry(v_quant, v_entry)
@@ -197,8 +195,6 @@ class TurboQuantDynamicCache(DynamicCache):
             v_quant = self._get_quantizer(layer_idx, head_dim, is_key=False)
             k_entry = k_quant.quantize(old_k)
             v_entry = v_quant.quantize(old_v)
-            self._compressed_keys[layer_idx].append(k_entry)
-            self._compressed_values[layer_idx].append(v_entry)
 
             k_dequant = self._dequant_entry(k_quant, k_entry)
             v_dequant = self._dequant_entry(v_quant, v_entry)

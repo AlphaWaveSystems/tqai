@@ -85,8 +85,9 @@ All results measured on Apple Silicon (MLX). Full data in [`benchmarks/results/`
 | Llama-3.1-8B Q4 | 2.95 | 2.95 | 2.95 | **0.00** |
 | Qwen2.5-7B Q8 | 2.40 | 2.40 | 2.40 | **0.00** |
 | Qwen2.5-14B Q4 | 2.22 | 2.22 | 2.22 | **0.00** |
+| Gemma 4 E4B Q4 | 126.94 | 126.94 | — | **0.00** |
 
-Δppl = 0.00 on **40 benchmark runs** (5 models × 8 compression configs).
+Δppl = 0.00 across **all models and compression configs** tested (6 models, 12 quantization variants).
 
 ### Throughput (MLX, v0.3.1 — fused Metal kernels + incremental cache)
 

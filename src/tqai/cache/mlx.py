@@ -68,7 +68,7 @@ class TurboQuantMLXCache:
         self._sink_keys: Any | None = None
         self._sink_values: Any | None = None
 
-        # Compressed storage (kept for memory savings / future use)
+        # Compressed storage (only used by "full" strategy for reconstruction)
         self._compressed_keys: list[tuple[Any, ...]] = []
         self._compressed_values: list[tuple[Any, ...]] = []
 
@@ -148,11 +148,9 @@ class TurboQuantMLXCache:
     # ------------------------------------------------------------------
 
     def _update_incremental(self, keys, values, mx):
-        """Quantize, store compressed, dequantize new token, append to buffer."""
+        """Quantize, dequantize new token, append to buffer."""
         k_entry = self._k_quantizer.quantize(keys)
         v_entry = self._v_quantizer.quantize(values)
-        self._compressed_keys.append(k_entry)
-        self._compressed_values.append(v_entry)
 
         # Dequantize only the new token(s)
         k_dequant = self._dequant_entry(self._k_quantizer, k_entry)
@@ -204,8 +202,6 @@ class TurboQuantMLXCache:
             # Compress and immediately dequantize into buffer
             k_entry = self._k_quantizer.quantize(old_k)
             v_entry = self._v_quantizer.quantize(old_v)
-            self._compressed_keys.append(k_entry)
-            self._compressed_values.append(v_entry)
 
             k_dequant = self._dequant_entry(self._k_quantizer, k_entry)
             v_dequant = self._dequant_entry(self._v_quantizer, v_entry)
