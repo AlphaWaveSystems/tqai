@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tqai"
-version = "0.2.0"
+version = "0.3.1"
 description = "TurboQuant KV cache compression for local LLM inference"
 readme = "README.md"
 license = "MIT"
@@ -31,7 +31,7 @@ dependencies = ["numpy>=1.24"]
 torch = ["torch>=2.1"]
 cuda = ["torch>=2.1", "triton>=2.0"]
 mlx = ["mlx>=0.14", "mlx-lm>=0.12"]
-codegen = ["scipy>=1.10"]
+codegen = ["scipy>=1.10", "cma>=3.0"]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",

@@ -65,6 +65,15 @@ class PolarQuantizer:
         centroids_np, _ = load_codebook(head_dim, bits)
         self._centroids = self.ops.from_numpy(centroids_np)
 
+        self._use_metal = False
+        if hasattr(self.ops, "quantize_fused"):
+            try:
+                from tqai.kernels import metal_available
+
+                self._use_metal = metal_available()
+            except ImportError:
+                pass
+
         if use_qjl:
             self._G = self._build_jl_matrix()
 
@@ -128,6 +137,10 @@ class PolarQuantizer:
                 - sketch shape ``(..., qjl_sketch_size)``, int8 (±1 signs)
                 - residual_norm shape ``(..., 1)``, FP16 L2 norm of residual
         """
+        # Fast path: fused Metal kernel (skipped when QJL needs intermediates)
+        if self._use_metal and not self.use_qjl:
+            return self.ops.quantize_fused(x, self._rotation, self._centroids)
+
         # 1. Extract and store norm
         norms = self.ops.norm(x, dim=-1, keepdim=True)
 
@@ -182,6 +195,12 @@ class PolarQuantizer:
         Returns:
             Reconstructed vectors, shape ``(..., head_dim)``, float32.
         """
+        # Fast path: fused Metal kernel (skipped when QJL correction needed)
+        if self._use_metal and qjl_data is None:
+            return self.ops.dequantize_fused(
+                indices, norms, self._rotation, self._centroids
+            )
+
         # 1. Lookup centroids
         y_hat = self.ops.index_select(self._centroids, indices)  # (..., d)
         y_hat = self.ops.float32(y_hat)

@@ -46,9 +46,9 @@ class CodebookRegistry:
             f"python -m scripts.generate_codebooks",
             stacklevel=2,
         )
-        from tqai.codebook.lloyd_max import solve_lloyd_max
+        from tqai.codebook.solvers import solve_codebook
 
-        centroids, boundaries = solve_lloyd_max(head_dim, bits)
+        centroids, boundaries = solve_codebook(head_dim, bits, solver="lloyd_max")
         self._cache[key] = (centroids, boundaries)
         return centroids, boundaries
 

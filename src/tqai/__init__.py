@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-__version__ = "0.2.0"
+__version__ = "0.3.1"
 
 from tqai.config import TurboQuantConfig
 
@@ -25,6 +25,9 @@ def patch(
     # QJL Stage 2 (opt-in, research use)
     use_qjl: bool = False,
     qjl_sketch_size: int = 64,
+    # Cache strategy (v0.3.1)
+    cache_strategy: str = "auto",
+    residual_window: int = 128,
 ):
     """Enable TurboQuant compression on a model.
 
@@ -53,6 +56,13 @@ def patch(
             Adds a 1-bit JL sketch to each KV token for inner-product bias correction.
             NOTE: degrades softmax attention on average; use for research only.
         qjl_sketch_size: Number of 1-bit JL projections (default 64).
+        cache_strategy: Cache reconstruction strategy. ``'auto'`` (default)
+            selects ``'incremental'`` which maintains a running dequantized
+            buffer for O(1) per-token cost. ``'residual'`` keeps the last
+            ``residual_window`` tokens uncompressed for better quality.
+            ``'full'`` uses the original O(n) full-reconstruction path.
+        residual_window: Number of recent tokens to keep uncompressed when
+            using the ``'residual'`` cache strategy (default 128).
 
     Returns:
         For HuggingFace: a ``TurboQuantDynamicCache`` to pass as ``past_key_values``.
@@ -84,6 +94,8 @@ def patch(
         bits_attn=bits_attn,
         use_qjl=use_qjl,
         qjl_sketch_size=qjl_sketch_size,
+        cache_strategy=cache_strategy,
+        residual_window=residual_window,
     )
     return _patch(model, config)
 
