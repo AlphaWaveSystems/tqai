@@ -32,6 +32,9 @@ class TurboQuantConfig:
     cache_strategy: str = "auto"  # "auto"|"incremental"|"residual"|"full"
     residual_window: int = 128  # tokens to keep uncompressed (residual strategy)
 
+    # Pipeline composition (v0.4)
+    pipeline: dict | None = None
+
     _VALID_STRATEGIES = {"auto", "incremental", "residual", "full"}
 
     def __post_init__(self):

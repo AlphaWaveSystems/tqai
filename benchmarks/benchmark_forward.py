@@ -53,6 +53,13 @@ CONFIGS = {
                        compress_ffn=True, bits_ffn=6),
     "aggressive": dict(bits_k=3, bits_v=2, compress_hidden=True, bits_hidden=6,
                        compress_ffn=True, bits_ffn=6),
+    # Pipeline middleware configs (v0.4)
+    "palm+tiered": dict(bits_k=4, bits_v=2,
+                        pipeline={"scorer": "palm", "strategy": "tiered"}),
+    "fisher+tiered": dict(bits_k=4, bits_v=2,
+                          pipeline={"scorer": "fisher", "strategy": "tiered"}),
+    "palm+delta":  dict(bits_k=4, bits_v=2,
+                        pipeline={"scorer": "palm", "strategy": "delta"}),
 }
 
 
@@ -110,6 +117,9 @@ def _run_hf_config(model, tokenizer, cfg_kwargs: dict, baseline_tokens: Optional
     cache = None
     if not no_tqai:
         patch_kw = {k: v for k, v in cfg_kwargs.items() if k != "no_tqai"}
+        if "pipeline" in patch_kw:
+            import tqai.scorers  # noqa: F401
+            import tqai.strategies  # noqa: F401
         cache = tqai.patch(model, backend="torch", **patch_kw)
 
     # Perplexity uses lazy import to avoid triggering hook on module name
@@ -147,6 +157,9 @@ def _run_mlx_config(model, tokenizer, cfg_kwargs: dict, baseline_tokens: Optiona
         patch_kw = {k: v for k, v in cfg_kwargs.items()
                     if k not in ("no_tqai", "compress_hidden", "compress_ffn",
                                  "compress_attn_logits", "bits_hidden", "bits_ffn", "bits_attn")}
+        if "pipeline" in patch_kw:
+            import tqai.scorers  # noqa: F401
+            import tqai.strategies  # noqa: F401
         tqai.patch(model, backend="mlx", **patch_kw)
 
     perp_mod = _load_perp_mod()

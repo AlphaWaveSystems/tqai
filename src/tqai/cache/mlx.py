@@ -83,6 +83,15 @@ class TurboQuantMLXCache:
         self.offset: int = 0
         self._input_dtype = None
 
+        # Pipeline middleware (v0.4)
+        self._k_pipeline = None
+        self._v_pipeline = None
+        if config.pipeline is not None:
+            from tqai.pipeline import build_pipeline
+
+            self._k_pipeline = build_pipeline(config, quantizer=self._k_quantizer)
+            self._v_pipeline = build_pipeline(config, quantizer=self._v_quantizer)
+
         # For mlx-lm compatibility
         self.keys = None
         self.values = None
@@ -149,12 +158,16 @@ class TurboQuantMLXCache:
 
     def _update_incremental(self, keys, values, mx):
         """Quantize, dequantize new token, append to buffer."""
-        k_entry = self._k_quantizer.quantize(keys)
-        v_entry = self._v_quantizer.quantize(values)
-
-        # Dequantize only the new token(s)
-        k_dequant = self._dequant_entry(self._k_quantizer, k_entry)
-        v_dequant = self._dequant_entry(self._v_quantizer, v_entry)
+        if self._k_pipeline is not None and self._k_pipeline.has_middleware:
+            k_compressed = self._k_pipeline.compress(keys, layer_idx=0)
+            v_compressed = self._v_pipeline.compress(values, layer_idx=0)
+            k_dequant = self._k_pipeline.decompress(k_compressed, layer_idx=0)
+            v_dequant = self._v_pipeline.decompress(v_compressed, layer_idx=0)
+        else:
+            k_entry = self._k_quantizer.quantize(keys)
+            v_entry = self._v_quantizer.quantize(values)
+            k_dequant = self._dequant_entry(self._k_quantizer, k_entry)
+            v_dequant = self._dequant_entry(self._v_quantizer, v_entry)
 
         # Cast to input dtype
         if self._input_dtype is not None:
@@ -200,11 +213,16 @@ class TurboQuantMLXCache:
             self._recent_values = self._recent_values[:, :, overflow:, :]
 
             # Compress and immediately dequantize into buffer
-            k_entry = self._k_quantizer.quantize(old_k)
-            v_entry = self._v_quantizer.quantize(old_v)
-
-            k_dequant = self._dequant_entry(self._k_quantizer, k_entry)
-            v_dequant = self._dequant_entry(self._v_quantizer, v_entry)
+            if self._k_pipeline is not None and self._k_pipeline.has_middleware:
+                k_compressed = self._k_pipeline.compress(old_k, layer_idx=0)
+                v_compressed = self._v_pipeline.compress(old_v, layer_idx=0)
+                k_dequant = self._k_pipeline.decompress(k_compressed, layer_idx=0)
+                v_dequant = self._v_pipeline.decompress(v_compressed, layer_idx=0)
+            else:
+                k_entry = self._k_quantizer.quantize(old_k)
+                v_entry = self._v_quantizer.quantize(old_v)
+                k_dequant = self._dequant_entry(self._k_quantizer, k_entry)
+                v_dequant = self._dequant_entry(self._v_quantizer, v_entry)
 
             if self._input_dtype is not None:
                 k_dequant = k_dequant.astype(self._input_dtype)

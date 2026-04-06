@@ -28,6 +28,8 @@ def patch(
     # Cache strategy (v0.3.1)
     cache_strategy: str = "auto",
     residual_window: int = 128,
+    # Pipeline composition (v0.4)
+    pipeline: dict | None = None,
 ):
     """Enable TurboQuant compression on a model.
 
@@ -96,6 +98,7 @@ def patch(
         qjl_sketch_size=qjl_sketch_size,
         cache_strategy=cache_strategy,
         residual_window=residual_window,
+        pipeline=pipeline,
     )
     return _patch(model, config)
 
