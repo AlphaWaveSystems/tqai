@@ -61,6 +61,31 @@ def cmd_info(args):
     print(f"  {', '.join(available)}")
 
 
+def cmd_plugins(args):
+    """List available pipeline plugins."""
+    # Ensure all modules are imported so registrations happen
+    import tqai.scorers  # noqa: F401
+    import tqai.strategies  # noqa: F401
+
+    try:
+        import tqai.monitors  # noqa: F401
+    except ImportError:
+        pass
+    try:
+        import tqai.adapters  # noqa: F401
+    except ImportError:
+        pass
+
+    from tqai.pipeline.registry import list_available
+
+    available = list_available()
+    print("tqai pipeline plugins\n")
+    for category, items in available.items():
+        label = category.capitalize()
+        print(f"  {label:<12} {', '.join(items) if items else '(none)'}")
+    print()
+
+
 def cmd_run(args):
     """Generate text with TurboQuant-compressed KV cache."""
     model_id = args.model
@@ -80,6 +105,21 @@ def cmd_run(args):
     if getattr(args, "compress_all", False):
         compress_hidden = True
         compress_ffn = True
+
+    # Build pipeline config from CLI flags
+    scorer_name = getattr(args, "scorer", None)
+    strategy_name = getattr(args, "strategy", None)
+    pipeline_cfg = None
+    if scorer_name or strategy_name:
+        # Ensure registrations happen
+        import tqai.scorers  # noqa: F401
+        import tqai.strategies  # noqa: F401
+
+        pipeline_cfg = {}
+        if scorer_name:
+            pipeline_cfg["scorer"] = scorer_name
+        if strategy_name:
+            pipeline_cfg["strategy"] = strategy_name
 
     from tqai.backend import detect_backend
 
@@ -102,17 +142,18 @@ def cmd_run(args):
     print()
 
     if detected == "mlx":
-        _run_mlx(model_id, prompt, bits_k, bits_v, max_tokens, no_tqai, tqai_config)
+        _run_mlx(model_id, prompt, bits_k, bits_v, max_tokens, no_tqai, tqai_config, pipeline=pipeline_cfg)
     else:
         _run_hf(
             model_id, prompt, bits_k, bits_v, max_tokens, no_tqai, backend, tqai_config,
             compress_hidden=compress_hidden, compress_ffn=compress_ffn,
             bits_hidden=bits_hidden, bits_ffn=bits_ffn,
             use_qjl=use_qjl, qjl_sketch_size=qjl_sketch_size,
+            pipeline=pipeline_cfg,
         )
 
 
-def _run_mlx(model_id, prompt, bits_k, bits_v, max_tokens, no_tqai, tqai_config=None):
+def _run_mlx(model_id, prompt, bits_k, bits_v, max_tokens, no_tqai, tqai_config=None, pipeline=None):
     import mlx_lm
 
     import tqai
@@ -123,7 +164,7 @@ def _run_mlx(model_id, prompt, bits_k, bits_v, max_tokens, no_tqai, tqai_config=
     print(f"Loaded in {time.perf_counter() - t0:.1f}s\n")
 
     if not no_tqai:
-        tqai.patch(model, bits_k=bits_k, bits_v=bits_v, backend="mlx", config_path=tqai_config)
+        tqai.patch(model, bits_k=bits_k, bits_v=bits_v, backend="mlx", config_path=tqai_config, pipeline=pipeline)
 
     print(f"Prompt: {prompt}\n")
     print("--- Response ---")
@@ -140,7 +181,7 @@ def _run_mlx(model_id, prompt, bits_k, bits_v, max_tokens, no_tqai, tqai_config=
 def _run_hf(
     model_id, prompt, bits_k, bits_v, max_tokens, no_tqai, backend, tqai_config=None,
     compress_hidden=False, compress_ffn=False, bits_hidden=8, bits_ffn=8,
-    use_qjl=False, qjl_sketch_size=64,
+    use_qjl=False, qjl_sketch_size=64, pipeline=None,
 ):
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -167,6 +208,7 @@ def _run_hf(
             compress_hidden=compress_hidden, bits_hidden=bits_hidden,
             compress_ffn=compress_ffn, bits_ffn=bits_ffn,
             use_qjl=use_qjl, qjl_sketch_size=qjl_sketch_size,
+            pipeline=pipeline,
         )
 
     inputs = tokenizer(prompt, return_tensors="pt")
@@ -360,6 +402,9 @@ def main():
     # info
     sub.add_parser("info", help="Show library and environment info")
 
+    # plugins
+    sub.add_parser("plugins", help="List available pipeline plugins (scorers, strategies, monitors, adapters)")
+
     # benchmark
     bench = sub.add_parser("benchmark", help="Run quantization accuracy benchmark")
     bench.add_argument("--backend", default=None, help="torch or mlx (auto)")
@@ -392,6 +437,10 @@ def main():
                      help="Enable QJL Stage 2 residual sketch (research/non-softmax use only)")
     run.add_argument("--qjl-sketch-size", type=int, default=64,
                      help="Number of 1-bit JL projections for QJL (default: 64)")
+    run.add_argument("--scorer", default=None,
+                     help="Pipeline scorer plugin (e.g., palm, fisher, snr)")
+    run.add_argument("--strategy", default=None,
+                     help="Pipeline compression strategy (e.g., tiered, delta, delta2)")
 
     # compare
     comp = sub.add_parser("compare", help="Compare baseline vs tqai output side by side")
@@ -413,6 +462,8 @@ def main():
     args = parser.parse_args()
     if args.command == "info":
         cmd_info(args)
+    elif args.command == "plugins":
+        cmd_plugins(args)
     elif args.command == "benchmark":
         cmd_benchmark(args)
     elif args.command == "run":

@@ -1,0 +1,91 @@
+{
+  "timestamp": "2026-04-06T15:33:10",
+  "model": "mlx-community/Qwen2.5-3B-Instruct-bf16",
+  "contexts": [
+    4096,
+    8192,
+    16384
+  ],
+  "chunk_size": 4096,
+  "max_new_tokens": 30,
+  "results": [
+    {
+      "config": "baseline",
+      "context_tokens": 3849,
+      "chunk_size": 4096,
+      "prefill_time_s": 0.59,
+      "generation_time_s": 0.35,
+      "total_time_s": 0.93,
+      "tokens_generated": 30,
+      "tokens_per_sec": 86.4,
+      "peak_rss_gb": 6.71,
+      "output_text": "The history of computing is a story of rapid technological advancements, from mechanical calculators to modern processors, with each generation improving speed, size, power consumption",
+      "output_match": true
+    },
+    {
+      "config": "chunked",
+      "context_tokens": 3849,
+      "chunk_size": 4096,
+      "prefill_time_s": 0.57,
+      "generation_time_s": 0.36,
+      "total_time_s": 0.93,
+      "tokens_generated": 30,
+      "tokens_per_sec": 82.72,
+      "peak_rss_gb": 6.75,
+      "output_text": "The history of computing is a story of rapid technological advancements, from mechanical calculators to modern processors, with each generation improving speed, size, power consumption",
+      "output_match": true
+    },
+    {
+      "config": "baseline",
+      "context_tokens": 7979,
+      "chunk_size": 4096,
+      "prefill_time_s": 1.15,
+      "generation_time_s": 0.37,
+      "total_time_s": 1.53,
+      "tokens_generated": 30,
+      "tokens_per_sec": 80.22,
+      "peak_rss_gb": 6.78,
+      "output_text": "The history of computing is a tale of relentless innovation, beginning with mechanical calculators in the 17th century and progressing through electromechanical rel",
+      "output_match": true
+    },
+    {
+      "config": "chunked",
+      "context_tokens": 7979,
+      "chunk_size": 4096,
+      "prefill_time_s": 3.26,
+      "generation_time_s": 1.1,
+      "total_time_s": 4.36,
+      "tokens_generated": 30,
+      "tokens_per_sec": 27.3,
+      "peak_rss_gb": 6.81,
+      "output_text": "The history of computing is a tale of relentless innovation, beginning with mechanical calculators in the 17th century and progressing through electromechanical rel",
+      "output_match": true
+    },
+    {
+      "config": "baseline",
+      "context_tokens": 16239,
+      "chunk_size": 4096,
+      "prefill_time_s": 2.61,
+      "generation_time_s": 0.39,
+      "total_time_s": 3.01,
+      "tokens_generated": 30,
+      "tokens_per_sec": 76.29,
+      "peak_rss_gb": 6.83,
+      "output_text": "The history of computing is a tale of relentless innovation, beginning with mechanical calculators in the 17th century and progressing through electromechanical rel",
+      "output_match": true
+    },
+    {
+      "config": "chunked",
+      "context_tokens": 16239,
+      "chunk_size": 4096,
+      "prefill_time_s": 11.96,
+      "generation_time_s": 2.08,
+      "total_time_s": 14.05,
+      "tokens_generated": 30,
+      "tokens_per_sec": 14.39,
+      "peak_rss_gb": 6.83,
+      "output_text": "The history of computing is a tale of relentless innovation, beginning with mechanical calculators in the 17th century and progressing through electromechanical rel",
+      "output_match": true
+    }
+  ]
+}

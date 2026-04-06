@@ -62,6 +62,25 @@ class TurboQuantDynamicCache(DynamicCache):
         self._recent_keys: dict[int, torch.Tensor | None] = {}
         self._recent_values: dict[int, torch.Tensor | None] = {}
 
+        # Pipeline middleware (v0.4)
+        self._pipeline_k: dict[int, Any] = {}
+        self._pipeline_v: dict[int, Any] = {}
+
+    def _get_pipeline(self, layer_idx: int, head_dim: int, is_key: bool):
+        """Lazily build a CompressionPipeline for this layer (if configured)."""
+        store = self._pipeline_k if is_key else self._pipeline_v
+        if layer_idx not in store:
+            if self.tq_config.pipeline is not None:
+                from tqai.pipeline import build_pipeline
+
+                quantizer = self._get_quantizer(layer_idx, head_dim, is_key)
+                store[layer_idx] = build_pipeline(
+                    self.tq_config, quantizer=quantizer
+                )
+            else:
+                store[layer_idx] = None
+        return store[layer_idx]
+
     def _get_quantizer(self, layer_idx: int, head_dim: int, is_key: bool) -> PolarQuantizer:
         store = self._key_quantizers if is_key else self._value_quantizers
         if layer_idx not in store:
@@ -142,13 +161,21 @@ class TurboQuantDynamicCache(DynamicCache):
     # ------------------------------------------------------------------
 
     def _update_incremental(self, layer_idx, key_states, value_states, head_dim):
-        k_quant = self._get_quantizer(layer_idx, head_dim, is_key=True)
-        v_quant = self._get_quantizer(layer_idx, head_dim, is_key=False)
-        k_entry = k_quant.quantize(key_states)
-        v_entry = v_quant.quantize(value_states)
+        k_pipe = self._get_pipeline(layer_idx, head_dim, is_key=True)
+        v_pipe = self._get_pipeline(layer_idx, head_dim, is_key=False)
 
-        k_dequant = self._dequant_entry(k_quant, k_entry)
-        v_dequant = self._dequant_entry(v_quant, v_entry)
+        if k_pipe is not None and k_pipe.has_middleware:
+            k_compressed = k_pipe.compress(key_states, layer_idx)
+            v_compressed = v_pipe.compress(value_states, layer_idx)
+            k_dequant = k_pipe.decompress(k_compressed, layer_idx)
+            v_dequant = v_pipe.decompress(v_compressed, layer_idx)
+        else:
+            k_quant = self._get_quantizer(layer_idx, head_dim, is_key=True)
+            v_quant = self._get_quantizer(layer_idx, head_dim, is_key=False)
+            k_entry = k_quant.quantize(key_states)
+            v_entry = v_quant.quantize(value_states)
+            k_dequant = self._dequant_entry(k_quant, k_entry)
+            v_dequant = self._dequant_entry(v_quant, v_entry)
 
         target_dtype = self._dtype.get(layer_idx)
         if target_dtype is not None:
@@ -191,13 +218,21 @@ class TurboQuantDynamicCache(DynamicCache):
             self._recent_keys[layer_idx] = self._recent_keys[layer_idx][:, :, overflow:, :]
             self._recent_values[layer_idx] = self._recent_values[layer_idx][:, :, overflow:, :]
 
-            k_quant = self._get_quantizer(layer_idx, head_dim, is_key=True)
-            v_quant = self._get_quantizer(layer_idx, head_dim, is_key=False)
-            k_entry = k_quant.quantize(old_k)
-            v_entry = v_quant.quantize(old_v)
+            k_pipe = self._get_pipeline(layer_idx, head_dim, is_key=True)
+            v_pipe = self._get_pipeline(layer_idx, head_dim, is_key=False)
 
-            k_dequant = self._dequant_entry(k_quant, k_entry)
-            v_dequant = self._dequant_entry(v_quant, v_entry)
+            if k_pipe is not None and k_pipe.has_middleware:
+                k_compressed = k_pipe.compress(old_k, layer_idx)
+                v_compressed = v_pipe.compress(old_v, layer_idx)
+                k_dequant = k_pipe.decompress(k_compressed, layer_idx)
+                v_dequant = v_pipe.decompress(v_compressed, layer_idx)
+            else:
+                k_quant = self._get_quantizer(layer_idx, head_dim, is_key=True)
+                v_quant = self._get_quantizer(layer_idx, head_dim, is_key=False)
+                k_entry = k_quant.quantize(old_k)
+                v_entry = v_quant.quantize(old_v)
+                k_dequant = self._dequant_entry(k_quant, k_entry)
+                v_dequant = self._dequant_entry(v_quant, v_entry)
 
             target_dtype = self._dtype.get(layer_idx)
             if target_dtype is not None:

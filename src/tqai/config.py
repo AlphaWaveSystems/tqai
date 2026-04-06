@@ -32,6 +32,18 @@ class TurboQuantConfig:
     cache_strategy: str = "auto"  # "auto"|"incremental"|"residual"|"full"
     residual_window: int = 128  # tokens to keep uncompressed (residual strategy)
 
+    # Pipeline composition (v0.4)
+    pipeline: dict | None = None
+
+    # Chunked attention (v0.4.0)
+    chunk_attention: bool = False
+    attention_chunk_size: int = 4096
+
+    # KV cache compression on/off (v0.4)
+    # Set to False to use only chunked attention or forward hooks without
+    # touching the KV cache.
+    kv_compression: bool = True
+
     _VALID_STRATEGIES = {"auto", "incremental", "residual", "full"}
 
     def __post_init__(self):

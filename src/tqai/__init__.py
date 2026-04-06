@@ -28,6 +28,14 @@ def patch(
     # Cache strategy (v0.3.1)
     cache_strategy: str = "auto",
     residual_window: int = 128,
+    # Pipeline composition (v0.4)
+    pipeline: dict | None = None,
+    # Chunked attention (v0.4.0)
+    chunk_attention: bool = False,
+    attention_chunk_size: int = 4096,
+    # KV cache compression toggle — set False to use only chunked attention
+    # or forward hooks without quantizing the KV cache.
+    kv_compression: bool = True,
 ):
     """Enable TurboQuant compression on a model.
 
@@ -96,6 +104,10 @@ def patch(
         qjl_sketch_size=qjl_sketch_size,
         cache_strategy=cache_strategy,
         residual_window=residual_window,
+        pipeline=pipeline,
+        chunk_attention=chunk_attention,
+        attention_chunk_size=attention_chunk_size,
+        kv_compression=kv_compression,
     )
     return _patch(model, config)
 
