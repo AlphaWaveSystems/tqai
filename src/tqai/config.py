@@ -35,6 +35,10 @@ class TurboQuantConfig:
     # Pipeline composition (v0.4)
     pipeline: dict | None = None
 
+    # Chunked attention (v0.4.0)
+    chunk_attention: bool = False
+    attention_chunk_size: int = 4096
+
     _VALID_STRATEGIES = {"auto", "incremental", "residual", "full"}
 
     def __post_init__(self):

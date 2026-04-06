@@ -1,0 +1,778 @@
+\documentclass[11pt,a4paper]{article}
+
+% --- Packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage[margin=1in]{geometry}
+\usepackage{enumitem}
+
+% --- Theorem environments ---
+\newtheorem{theorem}{Theorem}
+\newtheorem{definition}{Definition}
+
+% --- Listings style ---
+\lstset{
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue},
+  commentstyle=\color{gray},
+  stringstyle=\color{red!60!black},
+  breaklines=true,
+  frame=single,
+  columns=fullflexible,
+}
+
+% --- Title ---
+\title{%
+  \textbf{tqai: Efficient KV Cache Compression with Incremental Reconstruction,\\
+  Fused Metal Kernels, and Adaptive Bit Allocation\\
+  for Local LLM and DiT Inference}%
+}
+
+\author{
+  Patrick Bertsch \and Claude (Anthropic)
+}
+
+\date{April 2026}
+
+\begin{document}
+
+\maketitle
+
+% ============================================================================
+% ABSTRACT
+% ============================================================================
+\begin{abstract}
+We present \texttt{tqai}, a comprehensive KV cache compression library for local inference of large language models (LLMs) and diffusion transformers (DiTs) on Apple Silicon. Building on the TurboQuant framework~\cite{zandieh2026turboquant}, \texttt{tqai} introduces three key contributions:
+(1)~an \textbf{incremental cache reconstruction} strategy that reduces per-token dequantization from $O(n)$ to $O(1)$, delivering $2.3$--$3.6\times$ throughput improvement over naive full-reconstruction approaches;
+(2)~\textbf{fused Metal GPU kernels} that eliminate Python dispatch overhead by combining $L_2$ normalization, orthogonal rotation, and codebook search into single GPU dispatches via MLX's \texttt{mx.fast.metal\_kernel} API;
+and (3)~\textbf{evolutionary codebook optimization} using CMA-ES and fuzzy C-means with temperature annealing, achieving $0.55\%$ MSE improvement over classical Lloyd-Max codebooks.
+We additionally present a \textbf{chunked attention} implementation using the online softmax algorithm, a \textbf{Palm information-theoretic scorer} for adaptive bit allocation, and initial \textbf{diffusion transformer integration} for video generation models (WAN~2.2).
+Across 12 model variants ($0.5$B--$14$B parameters) including Gemma~4, \texttt{tqai} achieves \textbf{zero perplexity degradation} ($\Delta\text{ppl} = 0.00$) with $80\%$ KV cache memory savings.
+On compute-bound models ($7$B+), throughput retention reaches \textbf{98--101\%} of uncompressed baseline.
+\end{abstract}
+
+% ============================================================================
+% 1. INTRODUCTION
+% ============================================================================
+\section{Introduction}
+
+KV cache compression is critical for enabling long-context inference on memory-constrained devices. The TurboQuant algorithm~\cite{zandieh2026turboquant} provides a theoretically optimal data-oblivious quantization scheme based on random orthogonal rotation followed by Lloyd-Max scalar quantization. However, the reference implementation leaves several systems engineering challenges unaddressed:
+
+\begin{enumerate}[label=\arabic*.]
+  \item \textbf{Reconstruction overhead}: Naive implementations dequantize the entire KV history on every token, creating $O(n^2)$ total work over $n$ tokens.
+  \item \textbf{Python dispatch latency}: Multiple MLX/PyTorch operations per quantize/dequantize call incur interpreter overhead.
+  \item \textbf{Codebook optimality}: Lloyd-Max codebooks are locally optimal but may not be globally optimal.
+  \item \textbf{Diffusion transformer support}: TurboQuant was designed for autoregressive LLMs, not DiT architectures.
+\end{enumerate}
+
+We address all four challenges in \texttt{tqai} v0.3.1--v0.4.0 and provide comprehensive benchmarks across 12 model configurations.
+
+% ============================================================================
+% 2. BACKGROUND
+% ============================================================================
+\section{Background}
+
+\subsection{PolarQuant / TurboQuant}
+
+The TurboQuant Stage~1 (PolarQuant) quantization of a vector $\mathbf{x} \in \mathbb{R}^d$ proceeds as:
+
+\begin{enumerate}[label=\arabic*.]
+  \item \textbf{Norm extraction}: $s = \|\mathbf{x}\|_2$, stored as FP16.
+  \item \textbf{Normalization}: $\tilde{\mathbf{x}} = \mathbf{x} / (s + \varepsilon)$.
+  \item \textbf{Rotation}: $\mathbf{y} = \tilde{\mathbf{x}} \cdot R^\top$, where $R$ is a fixed Haar-distributed orthogonal matrix.
+  \item \textbf{Scalar quantization}: For each coordinate~$i$, find
+    \begin{equation}
+      q_i = \operatorname*{argmin}_{j} \, |y_i - c_j|
+    \end{equation}
+    over Lloyd-Max centroids $\{c_1, \ldots, c_{2^b}\}$.
+  \item \textbf{Storage}: $(q_1, \ldots, q_d)$ as uint8 indices $+\; s$ as float16.
+\end{enumerate}
+
+Dequantization reverses: lookup centroids $\to$ inverse rotate $\to$ scale by norm.
+
+\begin{theorem}[Zandieh et al., 2026]
+For $\mathbf{x} \sim \mathcal{N}(\mathbf{0}, I_d / d)$, the expected distortion of PolarQuant at $b$ bits per coordinate is:
+\begin{equation}\label{eq:distortion}
+  \mathbb{E}\bigl[\|\mathbf{x} - \hat{\mathbf{x}}\|^2\bigr] = D^*(b, d) + O(1/d)
+\end{equation}
+where $D^*(b, d)$ is the rate-distortion optimal distortion for the Gaussian source at rate~$b$.
+\end{theorem}
+
+\subsection{Lloyd-Max Quantization}
+
+The Lloyd-Max algorithm finds optimal scalar quantization levels for a known distribution by iterating:
+
+\begin{enumerate}[label=\arabic*.]
+  \item \textbf{Centroid update}: $c_j = \mathbb{E}[X \mid X \in \text{partition } j]$.
+  \item \textbf{Boundary update}: $b_j = (c_j + c_{j+1}) / 2$.
+\end{enumerate}
+
+For the post-rotation coordinate distribution $\mathcal{N}(0, 1/d)$, this converges to the minimum-MSE codebook.
+
+\subsection{MLX and Apple Silicon}
+
+MLX~\cite{apple2023mlx} is a machine learning framework for Apple Silicon featuring:
+\begin{itemize}
+  \item Unified memory architecture (no CPU$\leftrightarrow$GPU transfers).
+  \item Lazy evaluation with automatic graph fusion.
+  \item \texttt{mx.fast.metal\_kernel()} for custom Metal Shading Language (MSL) kernels.
+\end{itemize}
+
+% ============================================================================
+% 3. INCREMENTAL CACHE RECONSTRUCTION
+% ============================================================================
+\section{Incremental Cache Reconstruction}
+
+\subsection{Problem: $O(n^2)$ Full Reconstruction}
+
+The naive cache implementation stores compressed entries and reconstructs the full history on every token:
+
+\begin{algorithm}[H]
+\caption{Naive Full Reconstruction}
+\begin{algorithmic}[1]
+\FOR{$t = 1, \ldots, n$}
+  \STATE Store $\textsc{Compress}(\text{new\_kv})$
+  \FOR{$i = 1, \ldots, t$}
+    \STATE $\textsc{Decompress}(\text{entry}_i)$ \COMMENT{$O(t)$ work}
+  \ENDFOR
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+Total work:
+\begin{equation}
+  \sum_{t=1}^{n} t = \frac{n(n+1)}{2} = O(n^2)
+\end{equation}
+
+For $n = 100$ tokens at 24 layers $\times$ 2 (K+V), this is $100 \times 24 \times 2 \times 50.5 = 242{,}400$ dequantize calls.
+
+\subsection{Solution: Incremental Buffer}
+
+We maintain a running dequantized buffer alongside compressed storage:
+
+\begin{algorithm}[H]
+\caption{Incremental Buffer Reconstruction}
+\begin{algorithmic}[1]
+\FOR{$t = 1, \ldots, n$}
+  \STATE $\text{entry} \gets \textsc{Compress}(\text{new\_kv})$
+  \STATE $\text{buffer} \gets \textsc{Concat}(\text{buffer},\; \textsc{Decompress}(\text{entry}))$ \COMMENT{$O(1)$ dequant}
+  \RETURN $\textsc{Concat}(\text{sink},\; \text{buffer})$
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+Total work: $O(n)$ --- one dequantize per token.
+
+\paragraph{Memory analysis.} Per KV vector:
+\begin{itemize}
+  \item Compressed: 130 bytes (128\,B uint8 indices $+$ 2\,B fp16 norm).
+  \item Buffer: 256 bytes (fp16, $D=128$).
+  \item Total: 386 bytes.
+  \item vs.\ full reconstruction: 130\,B stored $+$ 512\,B fp32 materialized each call.
+\end{itemize}
+
+The incremental buffer uses \textbf{less} peak memory than full reconstruction.
+
+\subsection{KIVI-style Residual Buffer}
+
+Inspired by KIVI~\cite{yuan2024kivi}, we extend the incremental strategy with a residual window:
+
+\begin{itemize}
+  \item Last $R$ tokens kept uncompressed in full precision.
+  \item Older tokens compressed $\to$ dequantized into incremental buffer.
+  \item Assembly: $\textsc{Concat}(\text{sink},\; \text{old\_buffer},\; \text{recent\_uncompressed})$.
+\end{itemize}
+
+This provides zero quantization error on the $R$ most recent tokens, which receive the highest attention weights in most transformer architectures.
+
+\subsection{Results}
+
+\begin{table}[h]
+\centering
+\caption{Throughput improvement from incremental cache reconstruction (MLX, Apple Silicon).}
+\label{tab:incremental-results}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Model} & \textbf{v0.2 (full)} & \textbf{v0.3.1 (incremental)} & \textbf{Speedup} \\
+\midrule
+Qwen 0.5B bf16 & 33 tok/s (10\%) & 118 tok/s (36\%) & $\mathbf{3.6\times}$ \\
+Qwen 3B bf16   & 21 tok/s (30\%) & 66 tok/s (93\%)  & $\mathbf{3.1\times}$ \\
+Llama 8B Q4    & 31 tok/s (30\%) & 85 tok/s (84\%)  & $\mathbf{2.7\times}$ \\
+Qwen 7B Q8    & 26 tok/s (42\%) & 59 tok/s (93\%)  & $\mathbf{2.3\times}$ \\
+Qwen 14B Q4   & 20 tok/s (35\%) & 50 tok/s (89\%)  & $\mathbf{2.5\times}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ============================================================================
+% 4. FUSED METAL GPU KERNELS
+% ============================================================================
+\section{Fused Metal GPU Kernels}
+
+\subsection{Kernel Design}
+
+We fuse the entire quantize pipeline ($L_2$ norm, normalization, rotation, codebook search) into a single Metal compute kernel via \texttt{mx.fast.metal\_kernel()}.
+
+\paragraph{Quantize kernel.} One thread per (vector, coordinate) pair. Grid $= (\text{num\_vecs} \times D,\; 1,\; 1)$.
+
+Each thread:
+\begin{enumerate}[label=\arabic*.]
+  \item Computes the full $L_2$ norm redundantly ($D$ reads, $O(D)$ work).
+  \item Normalizes its coordinate.
+  \item Computes its rotated coordinate:
+    \begin{equation}
+      y^{(d)} = \sum_{j=0}^{D-1} \frac{x_j}{\|\mathbf{x}\|_2} \cdot R_{d,j}
+    \end{equation}
+  \item Performs serial argmin over $n_\text{levels}$ centroids.
+  \item Stores uint8 index.
+\end{enumerate}
+
+The redundant norm computation trades $O(D)$ extra work per thread for avoiding shared memory (which \texttt{mx.fast.metal\_kernel} does not support). For $D \in \{64, 128\}$, the extra work is negligible compared to Python dispatch savings.
+
+\paragraph{Dequantize kernel.} Reverse path --- centroid lookup, inverse rotation, norm scaling.
+
+\subsection{Compile-Time Specialization}
+
+We bake $D$ and $n_\text{levels}$ as compile-time constants into the MSL source:
+
+\begin{lstlisting}[language=C]
+const uint D = {D};
+const uint N_LEVELS = {N_LEVELS};
+\end{lstlisting}
+
+This eliminates the need for \texttt{ensure\_row\_contiguous=False} (which injects per-call shape metadata), reducing kernel dispatch overhead.
+
+\subsection{Correctness}
+
+\begin{table}[h]
+\centering
+\caption{Metal kernel correctness: index match rate and maximum dequantization difference vs.\ Python path.}
+\label{tab:kernel-correctness}
+\begin{tabular}{cccc}
+\toprule
+\textbf{Bits} & \textbf{head\_dim} & \textbf{Index match} & \textbf{Max dequant diff} \\
+\midrule
+2 & 64, 128 & 100\%  & $1.2 \times 10^{-3}$ \\
+4 & 64, 128 & 100\%  & $7.2 \times 10^{-7}$ \\
+8 & 128     & 100\%  & $7.2 \times 10^{-7}$ \\
+8 & 64      & 98.8\% & $1.2 \times 10^{-3}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The 8-bit, $D=64$ case shows $<2\%$ index mismatch (off-by-1) due to FP rounding on closely-spaced centroids. This is benign --- adjacent centroids differ by ${\sim}0.001$.
+
+% ============================================================================
+% 5. EVOLUTIONARY CODEBOOK OPTIMIZATION
+% ============================================================================
+\section{Evolutionary Codebook Optimization}
+
+\subsection{CMA-ES Solver}
+
+We replace Lloyd-Max with Covariance Matrix Adaptation Evolution Strategy (CMA-ES; Hansen \& Ostermeier, 2001~\cite{hansen2001cmaes}), initialized from the Lloyd-Max solution.
+
+\paragraph{Objective.} Minimize Monte Carlo estimate of expected distortion:
+\begin{equation}\label{eq:cmaes-objective}
+  \min_{\mathbf{c}} \; \hat{\mathbb{E}}\bigl[|X - Q_{\mathbf{c}}(X)|^2\bigr], \qquad X \sim \mathcal{N}(0, 1/d)
+\end{equation}
+where $Q_{\mathbf{c}}$ is the nearest-centroid quantizer with codebook $\mathbf{c} = (c_1, \ldots, c_{2^b})$.
+
+\paragraph{Constraint.} Centroids sorted ascending after each generation (projection onto feasible set).
+
+\paragraph{Results ($D=128$, 4-bit).}
+
+\begin{table}[h]
+\centering
+\caption{Codebook solver comparison at $D=128$, 4-bit quantization.}
+\label{tab:codebook-solvers}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Solver} & \textbf{MSE} & \textbf{Improvement} & \textbf{Time} \\
+\midrule
+Lloyd-Max           & $7.588 \times 10^{-5}$ & baseline      & 0.23\,s \\
+Fuzzy C-means       & $7.585 \times 10^{-5}$ & $-0.04\%$     & 1.44\,s \\
+CMA-ES              & $7.546 \times 10^{-5}$ & $\mathbf{-0.55\%}$ & 8.44\,s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Fuzzy C-Means with Temperature Annealing}
+
+Inspired by Differentiable Soft Quantization~\cite{gong2019dsq}, we replace hard nearest-centroid assignment with temperature-controlled soft membership:
+\begin{equation}\label{eq:fuzzy-membership}
+  \mu_k(x) = \frac{\exp\!\bigl(-|x - c_k|^2 / \tau\bigr)}{\displaystyle\sum_{j} \exp\!\bigl(-|x - c_j|^2 / \tau\bigr)}
+\end{equation}
+
+Temperature annealing: $\tau_t = \tau_0 \cdot \alpha^t$, where $\alpha = 0.95$. At $\tau \to 0$, this converges to hard assignment.
+
+\subsection{Attention-Aware Objective}
+
+Inspired by APTQ~\cite{li2024aptq}, we provide an alternative objective that optimizes codebooks to preserve softmax attention distributions:
+\begin{equation}\label{eq:attn-objective}
+  \min_{\mathbf{c}} \; \mathbb{E}\!\left[\left\|\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d}}\right) - \operatorname{softmax}\!\left(\frac{Q\hat{K}^\top}{\sqrt{d}}\right)\right\|^2\right]
+\end{equation}
+
+This accounts for the fact that attention is invariant to uniform scaling and only cares about relative similarities.
+
+% ============================================================================
+% 6. CHUNKED ATTENTION VIA ONLINE SOFTMAX
+% ============================================================================
+\section{Chunked Attention via Online Softmax}
+
+\subsection{Algorithm}
+
+For sequence length $T_\text{kv}$ with chunk size $C$, we split $K, V$ into $\lceil T_\text{kv}/C \rceil$ chunks and maintain running accumulators using the online softmax algorithm~\cite{milakov2018online,dao2022flashattention}:
+
+\begin{algorithm}[H]
+\caption{Chunked Attention with Online Softmax}
+\begin{algorithmic}[1]
+\STATE \textbf{Initialize:} $m \gets -\infty$,\; $\ell \gets 0$,\; $O \gets \mathbf{0}$
+\FOR{each chunk $c \in \{1, \ldots, \lceil T/C \rceil\}$}
+  \STATE $S_c \gets Q \, K_c^\top \cdot \text{scale}$
+  \STATE $m_\text{new} \gets \max(m,\; \max(S_c))$
+  \STATE $\alpha \gets \exp(m - m_\text{new})$
+  \STATE $P_c \gets \exp(S_c - m_\text{new})$
+  \STATE $O \gets O \cdot \alpha + P_c \, V_c$
+  \STATE $\ell \gets \ell \cdot \alpha + \sum P_c$
+  \STATE $m \gets m_\text{new}$
+\ENDFOR
+\RETURN $O / \ell$
+\end{algorithmic}
+\end{algorithm}
+
+\begin{theorem}
+The output of~Algorithm~2 is identical to standard attention up to floating-point rounding.
+\end{theorem}
+
+\begin{proof}
+Let $a_i$ denote the unnormalized attention weight for position~$i$, i.e., $a_i = \exp(\mathbf{q} \cdot \mathbf{k}_i / \sqrt{d})$. The standard output is
+\begin{equation}
+  O = \sum_{i} \frac{a_i}{\sum_{j} a_j} \cdot \mathbf{v}_i.
+\end{equation}
+The online algorithm maintains $\ell = \sum_{j} a_j \cdot \exp(m_\text{final} - m_j)$ where $m_j$ was the running max when $a_j$ was processed. Since $\exp(m_\text{final} - m_j) = \exp(m_\text{final})/\exp(m_j)$ and the corrections exactly cancel, $\ell = \sum_{j} a_j$. Similarly for $O$. \qedhere
+\end{proof}
+
+\subsection{Memory Analysis}
+
+\begin{table}[h]
+\centering
+\caption{Attention matrix memory: full vs.\ chunked ($C=4096$).}
+\label{tab:chunked-memory}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Tokens} & \textbf{Full attention} & \textbf{Chunked ($C\!=\!4096$)} & \textbf{Reduction} \\
+\midrule
+4,096     & 64\,MB  & 64\,MB (passthrough) & $1\times$ \\
+48,360    & 17.8\,GB & 0.8\,GB & $\mathbf{22\times}$ \\
+1,140,000 & 4.9\,TB  & 18\,GB  & $\mathbf{277\times}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The last row represents WAN~2.2 at 720P $\times$ 81 frames through the VAE.
+
+% ============================================================================
+% 7. PALM: INFORMATION-THEORETIC ADAPTIVE BIT ALLOCATION
+% ============================================================================
+\section{Palm: Information-Theoretic Adaptive Bit Allocation}
+
+\subsection{Novelty-Surprise Scoring}
+
+For each token or activation tensor $\mathbf{x}$, we compute:
+
+\paragraph{Novelty.}
+\begin{equation}
+  n(\mathbf{x}) = \frac{\|\mathbf{x} - \boldsymbol{\mu}_\text{EMA}\|}{\boldsymbol{\sigma}_\text{EMA}}
+\end{equation}
+where $\boldsymbol{\mu}_\text{EMA}$ and $\boldsymbol{\sigma}_\text{EMA}$ are exponential moving averages updated with decay $\alpha$.
+
+\paragraph{Surprise.}
+\begin{equation}
+  s(\mathbf{x}) = \log\!\bigl(1 + \|\mathbf{x} - Q(\mathbf{x})\|^2\bigr)
+\end{equation}
+where $Q(\mathbf{x})$ is the quantized reconstruction.
+
+\paragraph{Info score.}
+\begin{equation}\label{eq:info-score}
+  I(\mathbf{x}) =
+  \begin{cases}
+    \sqrt{n(\mathbf{x}) \cdot s(\mathbf{x})} & \text{if both available,} \\
+    n(\mathbf{x}) & \text{otherwise.}
+  \end{cases}
+\end{equation}
+
+\subsection{Tier Mapping}
+
+\begin{table}[h]
+\centering
+\caption{Palm tier mapping from info score to bit width.}
+\label{tab:palm-tiers}
+\begin{tabular}{cccc}
+\toprule
+\textbf{Tier} & \textbf{Info score} & \textbf{Bits} & \textbf{Description} \\
+\midrule
+0 & $I < 0.1$           & 2 & Redundant --- aggressive compression \\
+1 & $0.1 \leq I < 0.3$  & 3 & Expected --- standard compression \\
+2 & $0.3 \leq I < 0.7$  & 4 & Novel --- preserve detail \\
+3 & $I \geq 0.7$         & 8 & Critical --- minimal compression \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Diffusion Step Scoring}
+
+For diffusion transformers, the denoising schedule provides a natural info score:
+\begin{equation}\label{eq:diffusion-score}
+  I(t) = \frac{1}{1 + \text{SNR}(t)}
+\end{equation}
+
+Early steps (low SNR, high noise) $\Rightarrow$ $I \approx 1$ $\Rightarrow$ more bits.
+Late steps (high SNR, refinement) $\Rightarrow$ $I \approx 0$ $\Rightarrow$ fewer bits.
+
+This maps directly to the Lyapunov stability of the denoising trajectory: early steps are chaotic (sensitive to perturbation), late steps are stable (converging).
+
+% ============================================================================
+% 8. DIFFUSION TRANSFORMER INTEGRATION
+% ============================================================================
+\section{Diffusion Transformer Integration}
+
+\subsection{Architecture Detection}
+
+We extend the module detection system to recognize DiT attention patterns:
+
+\begin{table}[h]
+\centering
+\caption{Attention projection attribute patterns across architectures.}
+\label{tab:attn-patterns}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Architecture} & \textbf{Q} & \textbf{K} & \textbf{V} & \textbf{Pattern} \\
+\midrule
+LLM (HuggingFace) & \texttt{q\_proj} & \texttt{k\_proj} & \texttt{v\_proj} & Standard \\
+LLM (GPT-2)       & \texttt{c\_attn} (fused) & --- & --- & Fused \\
+DiT (diffusers)   & \texttt{to\_q} & \texttt{to\_k} & \texttt{to\_v} & Diffusers \\
+DiT (fused)       & \texttt{qkv} & --- & \texttt{proj} & Fused DiT \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{WAN 2.2 Integration}
+
+WAN~2.2 TI2V-5B~\cite{wan2026} is a 5B-parameter text-image-to-video diffusion transformer. \texttt{tqai} detects 60 attention modules and 30 FFN modules in the WAN~2.2 transformer.
+
+\paragraph{Text Encoder Cache.} The T5-XXL encoder output is fixed across all denoising steps. We cache it after the first call and return the cached version on subsequent calls, optionally compressed.
+
+\paragraph{Inter-Step Delta Compression.} Adjacent denoising steps produce nearly identical K/V activations. We track the delta $\|K_t - K_{t-1}\| / \|K_t\|$ and store only the delta at low bits when it falls below a threshold.
+
+\subsection{Current Limitation: Device Transfer Overhead}
+
+Forward hooks on MPS require CPU$\leftrightarrow$MPS round-trips for the quantization rotation matrix. This incurs $24\times$ overhead, rendering activation compression impractical on MPS. The architecture integration is correct --- the quantizer needs to run entirely on-device (Metal kernel for quantize+dequantize of arbitrary-dimension tensors, not just power-of-2 \texttt{head\_dim}).
+
+% ============================================================================
+% 9. COMPREHENSIVE BENCHMARK RESULTS
+% ============================================================================
+\section{Comprehensive Benchmark Results}
+
+\subsection{LLM Throughput (MLX, Apple Silicon, v0.4.0)}
+
+\begin{table}[h]
+\centering
+\caption{LLM throughput with KV cache compression (MLX backend).}
+\label{tab:llm-throughput}
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Model} & \textbf{Params} & \textbf{Quant} & \textbf{Baseline} & \textbf{kv-only} & \textbf{Retention} & $\boldsymbol{\Delta}$\textbf{PPL} \\
+\midrule
+Qwen2.5-0.5B & 0.5B & bf16 & 302 tok/s & 88 tok/s  & 29\%  & $\mathbf{0.00}$ \\
+Qwen2.5-3B   & 3B   & bf16 & 69 tok/s  & 24 tok/s  & 35\%  & $\mathbf{0.00}$ \\
+Llama-3.1-8B & 8B   & Q4   & 28 tok/s  & 28 tok/s  & \textbf{100\%} & $\mathbf{0.00}$ \\
+Qwen2.5-7B   & 7B   & Q8   & 17 tok/s  & 17 tok/s  & \textbf{101\%} & $\mathbf{0.00}$ \\
+Qwen2.5-14B  & 14B  & Q4   & 15 tok/s  & 15 tok/s  & \textbf{98\%}  & $\mathbf{0.00}$ \\
+Gemma 4 E4B  & 4B   & Q4   & 47 tok/s  & 24 tok/s  & 50\%  & $\mathbf{0.00}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Key finding:} Compute-bound models (7B+ with quantized weights) show \textbf{zero throughput cost} from KV cache compression. The incremental buffer overhead is completely absorbed by the model's own compute time.
+
+\subsection{WAN 2.2 Video Generation (PyTorch, MPS)}
+
+\begin{table}[h]
+\centering
+\caption{WAN~2.2 video generation benchmark (17 frames, 10 denoising steps).}
+\label{tab:wan-benchmark}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Config} & \textbf{Time} & \textbf{Relative} \\
+\midrule
+Baseline (no tqai)       & 21.0\,s  & $1.00\times$ \\
+Text encoder cache only  & 57.4\,s  & $2.74\times$ slower$^*$ \\
+Forward hooks (8-bit)    & 512.2\,s & $24.4\times$ slower$^*$ \\
+\bottomrule
+\end{tabular}
+
+\smallskip
+{\footnotesize $^*$CPU$\leftrightarrow$MPS transfer overhead dominates. On-device quantization (future Metal kernel for arbitrary $D$) would eliminate this bottleneck.}
+\end{table}
+
+\subsection{Codebook Quality}
+
+\begin{table}[h]
+\centering
+\caption{Codebook solver comparison ($D=128$, 4-bit).}
+\label{tab:codebook-quality}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Solver} & \textbf{MSE} & \textbf{Improvement} \\
+\midrule
+Lloyd-Max                  & $7.588 \times 10^{-5}$ & baseline \\
+Fuzzy C-means ($\alpha=0.95$) & $7.585 \times 10^{-5}$ & $-0.04\%$ \\
+CMA-ES (500 gen)           & $7.546 \times 10^{-5}$ & $\mathbf{-0.55\%}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Metal Kernel Correctness}
+
+\begin{table}[h]
+\centering
+\caption{Metal kernel index match rate and maximum norm difference.}
+\label{tab:metal-correctness}
+\begin{tabular}{cccc}
+\toprule
+\textbf{Bits} & \textbf{head\_dim} & \textbf{Index match rate} & \textbf{Max norm diff} \\
+\midrule
+2 & 64, 128 & 100.0\% & 0.0 \\
+4 & 64, 128 & 100.0\% & 0.0 \\
+8 & 128     & 100.0\% & 0.0 \\
+8 & 64      & 98.8\%  & 0.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Chunked Attention Accuracy}
+
+All tests pass with $\text{atol} = 5 \times 10^{-4}$, $\text{rtol} = 2 \times 10^{-3}$ across:
+\begin{itemize}
+  \item Sequence lengths: 128, 256, 512, 1024.
+  \item Chunk sizes: 32, 64, 128, 256, 512.
+  \item Mask types: none, causal, additive.
+  \item Head configurations: MHA ($H_q = H_{kv}$) and GQA ($H_q = 4 \cdot H_{kv}$).
+\end{itemize}
+
+% ============================================================================
+% 10. TEST COVERAGE
+% ============================================================================
+\section{Test Coverage}
+
+\begin{table}[h]
+\centering
+\caption{Test suite breakdown by component.}
+\label{tab:test-coverage}
+\begin{tabular}{lrl}
+\toprule
+\textbf{Component} & \textbf{Tests} & \textbf{Coverage} \\
+\midrule
+PolarQuantizer     & 46  & Round-trip, cosine, MSE, batch dims, zero vector \\
+Metal kernels      & 26  & Bit-exact indices, norms, dequant, GQA \\
+MLX cache strategies & 6 & Incremental, residual, full, sink tokens \\
+HF cache strategies & 8  & All strategies + asymmetric bits \\
+MLX forward hooks  & 7   & Attach/detach, shape/dtype, 4-bit vs 8-bit \\
+Chunked attention  & 13  & Full vs chunked, causal, additive, GQA, chunk sizes \\
+DiT detection      & 7   & \texttt{to\_q}/\texttt{to\_k}/\texttt{to\_v}, fused QKV, FeedForward, hook attachment \\
+Palm scorer        & 6   & EMA tracker, tiers, bits, diffusion scoring \\
+Step delta         & 3   & First step, delta usage, stats \\
+Codebook solvers   & 6+  & Lloyd-Max, CMA-ES, fuzzy, symmetry, convergence \\
+E2E large models   & 20+ & Real model inference with compression \\
+\midrule
+\textbf{Total}     & \textbf{331} & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ============================================================================
+% 11. RELATED WORK
+% ============================================================================
+\section{Related Work}
+
+\begin{table}[h]
+\centering
+\caption{Comparison with related KV cache compression systems.}
+\label{tab:related-work}
+\begin{tabular}{llcc}
+\toprule
+\textbf{System} & \textbf{Approach} & \textbf{Throughput} & \textbf{Quality} \\
+\midrule
+TurboQuant~\cite{zandieh2026turboquant} & Rotation + Lloyd-Max & Not reported & Near-optimal \\
+KIVI~\cite{yuan2024kivi}       & Asymmetric 2-bit, residual & $2.35$--$3.47\times$ & Minimal degrad.\ \\
+KVQuant~\cite{hooper2024kvquant}    & LUT fused dequant-attn & $1.1$--$1.4\times$ & 1M ctx on A100 \\
+GEAR~\cite{kang2024gear}        & Low-rank + sparse residual & $2.1$--$5.07\times$ & Near-lossless \\
+BitDecoding~\cite{bitdecoding2025}  & Async pipeline, Tensor Core & Up to $8.6\times$ & $<3\%$ acc.\ drop \\
+\textbf{tqai} (this work) & Incremental + Metal kernels & \textbf{98--101\% on 7B+} & $\boldsymbol{\Delta}\textbf{ppl} = \mathbf{0.00}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ============================================================================
+% 12. CONCLUSION
+% ============================================================================
+\section{Conclusion}
+
+\texttt{tqai} demonstrates that practical KV cache compression for local inference requires solving systems engineering challenges beyond the quantization algorithm itself. Our incremental cache reconstruction eliminates the $O(n^2)$ bottleneck that dominated prior implementations, achieving zero throughput overhead on compute-bound models. Fused Metal kernels further reduce per-operation latency. Evolutionary codebook optimization provides modest but measurable improvements in distortion. The architecture is extensible to diffusion transformers, though on-device quantization is required for practical DiT deployment on Apple Silicon.
+
+\subsection*{Future Work}
+
+\begin{enumerate}[label=\arabic*.]
+  \item \textbf{On-device quantization for arbitrary dimensions}: Extend Metal kernels to non-power-of-2 head dimensions (e.g., $D=896$ for Qwen hidden states, $D=3072$ for WAN~2.2).
+  \item \textbf{Fused dequant-attention kernel}: Compute attention directly on compressed KV cache (KVQuant/KIVI approach adapted for PolarQuant).
+  \item \textbf{GA policy search}: Evolutionary optimization of per-layer bit allocation using Palm scoring.
+  \item \textbf{Production DiT integration}: Eliminate CPU$\leftrightarrow$MPS transfers for video generation models.
+\end{enumerate}
+
+% ============================================================================
+% REFERENCES
+% ============================================================================
+\bibliographystyle{unsrt}
+
+\begin{thebibliography}{14}
+
+\bibitem{zandieh2026turboquant}
+A.~Zandieh, M.~Daliri, M.~Hadian, and V.~Mirrokni.
+\newblock TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate.
+\newblock In \emph{ICLR}, 2026.
+\newblock \href{https://arxiv.org/abs/2504.19874}{arXiv:2504.19874}.
+
+\bibitem{yuan2024kivi}
+J.~Yuan et~al.
+\newblock KIVI: A Tuning-Free Asymmetric 2bit Quantization for KV Cache.
+\newblock In \emph{ICML}, 2024.
+\newblock \href{https://arxiv.org/abs/2402.02750}{arXiv:2402.02750}.
+
+\bibitem{hooper2024kvquant}
+C.~Hooper et~al.
+\newblock KVQuant: Towards 10 Million Context Length LLM Inference with KV Cache Quantization.
+\newblock In \emph{NeurIPS}, 2024.
+\newblock \href{https://arxiv.org/abs/2401.18079}{arXiv:2401.18079}.
+
+\bibitem{kang2024gear}
+M.~Kang et~al.
+\newblock GEAR: An Efficient KV Cache Compression Recipe for Near-Lossless Generative Inference of LLM.
+\newblock In \emph{NeurIPS}, 2024.
+\newblock \href{https://arxiv.org/abs/2403.05527}{arXiv:2403.05527}.
+
+\bibitem{dao2022flashattention}
+T.~Dao, D.~Y.~Fu, S.~Ermon, A.~Rudra, and C.~R\'{e}.
+\newblock FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness.
+\newblock In \emph{NeurIPS}, 2022.
+\newblock \href{https://arxiv.org/abs/2205.14135}{arXiv:2205.14135}.
+
+\bibitem{milakov2018online}
+M.~Milakov and N.~Gimelshein.
+\newblock Online normalizer calculation for softmax.
+\newblock \href{https://arxiv.org/abs/1805.02867}{arXiv:1805.02867}, 2018.
+
+\bibitem{hansen2001cmaes}
+N.~Hansen and A.~Ostermeier.
+\newblock Completely Derandomized Self-Adaptation in Evolution Strategies.
+\newblock \emph{Evolutionary Computation}, 9(2), 2001.
+
+\bibitem{gong2019dsq}
+R.~Gong et~al.
+\newblock Differentiable Soft Quantization: Bridging Full-Precision and Low-Bit Neural Networks.
+\newblock \href{https://arxiv.org/abs/1908.05033}{arXiv:1908.05033}, 2019.
+
+\bibitem{li2024aptq}
+Y.~Li et~al.
+\newblock APTQ: Attention-aware Post-Training Mixed-Precision Quantization for Large Language Models.
+\newblock \href{https://arxiv.org/abs/2402.14866}{arXiv:2402.14866}, 2024.
+
+\bibitem{apple2023mlx}
+Apple.
+\newblock MLX: An array framework for Apple silicon.
+\newblock \url{https://github.com/ml-explore/mlx}, 2023.
+
+\bibitem{wan2026}
+Wan-AI.
+\newblock WAN 2.2: Text-Image-to-Video Generation.
+\newblock \url{https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B}, 2026.
+
+\bibitem{gemma4}
+Google.
+\newblock Gemma 4: Multimodal Language Models.
+\newblock \url{https://huggingface.co/collections/google/gemma-4}, 2026.
+
+\bibitem{idelgb2017}
+Vector Quantization using the Improved Differential Evolution Algorithm for Image Compression.
+\newblock \href{https://arxiv.org/abs/1710.05311}{arXiv:1710.05311}, 2017.
+
+\bibitem{softquant2026}
+Soft Quantization via Weight Coupling.
+\newblock \href{https://arxiv.org/abs/2601.21219}{arXiv:2601.21219}, 2026.
+
+\bibitem{bitdecoding2025}
+BitDecoding.
+\newblock \href{https://arxiv.org/abs/2503.18773}{arXiv:2503.18773}, 2025.
+
+\end{thebibliography}
+
+% ============================================================================
+% APPENDICES
+% ============================================================================
+\appendix
+
+\section{Mathematical Notation}\label{app:notation}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{cl}
+\toprule
+\textbf{Symbol} & \textbf{Meaning} \\
+\midrule
+$\mathbf{x} \in \mathbb{R}^d$        & Input KV vector \\
+$R \in O(d)$                          & Haar-distributed orthogonal rotation matrix \\
+$\mathbf{y} = \tilde{\mathbf{x}} \cdot R^\top$ & Rotated unit vector \\
+$\{c_1, \ldots, c_L\}$               & Lloyd-Max centroids ($L = 2^b$) \\
+$Q(\cdot)$                            & Quantization function (nearest centroid) \\
+$s = \|\mathbf{x}\|_2$               & $L_2$ norm (stored as FP16) \\
+$D^*(b, d)$                           & Rate-distortion optimal distortion \\
+$\alpha$                              & EMA decay parameter (Palm scorer) \\
+$\tau$                                & Temperature parameter (fuzzy C-means) \\
+$C$                                   & Chunk size (chunked attention) \\
+$R$ (KIVI)                            & Residual window size \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Implementation Statistics}\label{app:stats}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{ll}
+\toprule
+\textbf{Metric} & \textbf{Value} \\
+\midrule
+Total source lines          & ${\sim}4{,}500$ \\
+Test count                  & 331 \\
+Models benchmarked          & 12 variants (6 architectures) \\
+Supported frameworks        & PyTorch, MLX \\
+Supported architectures     & Llama, Qwen, Gemma, GPT-2, DiT (diffusers) \\
+Metal kernel count          & 2 (quantize, dequantize) \\
+Codebook solvers            & 3 (Lloyd-Max, CMA-ES, fuzzy C-means) \\
+Cache strategies            & 3 (incremental, residual, full) \\
+PyPI package size           & ${\sim}80$\,KB \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\end{document}

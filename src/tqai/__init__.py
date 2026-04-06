@@ -30,6 +30,9 @@ def patch(
     residual_window: int = 128,
     # Pipeline composition (v0.4)
     pipeline: dict | None = None,
+    # Chunked attention (v0.4.0)
+    chunk_attention: bool = False,
+    attention_chunk_size: int = 4096,
 ):
     """Enable TurboQuant compression on a model.
 
@@ -99,6 +102,8 @@ def patch(
         cache_strategy=cache_strategy,
         residual_window=residual_window,
         pipeline=pipeline,
+        chunk_attention=chunk_attention,
+        attention_chunk_size=attention_chunk_size,
     )
     return _patch(model, config)
 

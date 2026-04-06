@@ -1,7 +1,8 @@
 """Architecture-agnostic module detection for transformer models.
 
-Detects attention and FFN modules across common HuggingFace architectures
-(Llama, Qwen2, Mistral, Phi, Gemma, Falcon, GPT-NeoX, etc.) using
+Detects attention and FFN modules across LLM architectures (Llama, Qwen2,
+Mistral, Phi, Gemma, Falcon, GPT-NeoX) and Diffusion Transformer (DiT)
+architectures (diffusers BasicTransformerBlock, WAN 2.2, etc.) using
 attribute-pattern matching rather than class-name checks.
 """
 
@@ -14,7 +15,7 @@ def is_attention(module) -> bool:
     """Detect multi-head attention modules.
 
     Matches modules that have q_proj/k_proj/v_proj attributes (HuggingFace
-    standard) or c_attn (GPT-2 style fused projection).
+    standard), c_attn (GPT-2 style), or to_q/to_k/to_v (diffusers DiT).
     """
     # Standard HuggingFace: separate q/k/v projections
     if all(hasattr(module, attr) for attr in ("q_proj", "k_proj", "v_proj")):
@@ -22,14 +23,20 @@ def is_attention(module) -> bool:
     # GPT-2 style: fused c_attn
     if hasattr(module, "c_attn") and hasattr(module, "c_proj"):
         return True
+    # Diffusers DiT: to_q/to_k/to_v (BasicTransformerBlock.attn1/attn2)
+    if all(hasattr(module, attr) for attr in ("to_q", "to_k", "to_v")):
+        return True
+    # Fused QKV projection (some DiT variants)
+    if hasattr(module, "qkv") and hasattr(module, "proj"):
+        return True
     return False
 
 
 def is_ffn(module) -> bool:
     """Detect feed-forward / MLP modules.
 
-    Matches SwiGLU (gate_proj + up_proj + down_proj) and classic FFN
-    (fc1/fc2 or c_fc/c_proj) patterns.
+    Matches SwiGLU (gate_proj + up_proj + down_proj), classic FFN
+    (fc1/fc2 or c_fc/c_proj), and diffusers FeedForward (net) patterns.
     """
     # SwiGLU (Llama, Qwen2, Mistral, Gemma)
     if all(hasattr(module, attr) for attr in ("gate_proj", "up_proj", "down_proj")):
@@ -40,6 +47,11 @@ def is_ffn(module) -> bool:
     # GPT-2 MLP style
     if hasattr(module, "c_fc") and hasattr(module, "c_proj") and not hasattr(module, "c_attn"):
         return True
+    # Diffusers FeedForward (wraps GEGLU/GELU in net attribute)
+    if hasattr(module, "net") and not is_attention(module):
+        net = getattr(module, "net", None)
+        if net is not None and hasattr(net, "__len__") and len(net) >= 2:
+            return True
     return False
 
 
@@ -54,7 +66,7 @@ def iter_transformer_layers(model) -> Iterator[tuple[str, object]]:
     - model.model.decoder.layers[i]  (OPT)
     """
     def _try_layers(root, prefix=""):
-        for path in ("layers", "h", "blocks"):
+        for path in ("layers", "h", "blocks", "transformer_blocks"):
             layers = _nested_get(root, path)
             if layers is not None:
                 for i, layer in enumerate(layers):
@@ -70,6 +82,9 @@ def iter_transformer_layers(model) -> Iterator[tuple[str, object]]:
     )
     if inner is not None:
         yield from _try_layers(inner, prefix="model.")
+        # If inner has no layers, try inner.transformer_blocks (DiT)
+        if not list(_try_layers(inner, prefix="model.")):
+            yield from _try_layers(model)
     else:
         yield from _try_layers(model)
 
