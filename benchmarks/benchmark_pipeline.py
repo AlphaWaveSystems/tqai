@@ -14,7 +14,7 @@ import argparse
 import json
 import sys
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import numpy as np
@@ -23,16 +23,14 @@ _REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 # Ensure all plugins registered
-import tqai.scorers   # noqa: F401
-import tqai.strategies  # noqa: F401
 import tqai.monitors  # noqa: F401
-
+import tqai.scorers  # noqa: F401
+import tqai.strategies  # noqa: F401
 from tqai.backend import get_backend
 from tqai.config import TurboQuantConfig
 from tqai.pipeline import build_pipeline
 from tqai.pipeline.registry import list_available
 from tqai.quantizer import PolarQuantizer
-
 
 # ---------------------------------------------------------------------------
 # Model dimension profiles
@@ -110,7 +108,6 @@ def benchmark_config(
     n_steps: int = 5,
 ) -> PipelineBenchResult:
     """Benchmark one pipeline config on one model profile."""
-    import torch
 
     head_dim = profile["head_dim"]
     n_kv_heads = profile["n_kv_heads"]

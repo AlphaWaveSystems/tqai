@@ -22,10 +22,9 @@ from __future__ import annotations
 import argparse
 import gc
 import json
-import os
 import sys
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import numpy as np
@@ -35,9 +34,8 @@ _REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 # Ensure registrations
-import tqai.scorers   # noqa: F401
+import tqai.scorers  # noqa: F401
 import tqai.strategies  # noqa: F401
-
 
 # ---------------------------------------------------------------------------
 # LTX-2 MPS fix

@@ -93,7 +93,6 @@ class WindowStrategy:
 
 def _cosine_similarity(a, b) -> float:
     if hasattr(a, "flatten"):
-        import torch
         a_flat = a.flatten().float()
         b_flat = b.flatten().float()
         dot = (a_flat * b_flat).sum()

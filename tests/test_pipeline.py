@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from tqai.backend import get_backend
 from tqai.config import TurboQuantConfig
 from tqai.pipeline import (
     CompressionPipeline,
@@ -13,12 +14,9 @@ from tqai.pipeline import (
     list_available,
     register_scorer,
     register_strategy,
-    register_monitor,
 )
-from tqai.pipeline.registry import _SCORERS, _STRATEGIES, _MONITORS
+from tqai.pipeline.registry import _MONITORS, _SCORERS, _STRATEGIES
 from tqai.quantizer import PolarQuantizer
-from tqai.backend import get_backend
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

@@ -10,16 +10,24 @@ try:
     import mlx.nn as nn
 
     HAS_MLX = True
+    _Module = nn.Module
 except ImportError:
     HAS_MLX = False
+    nn = None  # type: ignore[assignment]
+    mx = None  # type: ignore[assignment]
+    _Module = object  # collection-time fallback
 
 pytestmark = pytest.mark.skipif(not HAS_MLX, reason="MLX not available")
 
 
 # -- Fake MLX model components ------------------------------------------------
+# These class bodies must be importable on Linux CI (no MLX). They reference
+# `nn.*` only inside `__init__` / `__call__`, which never run when MLX is
+# missing because `pytestmark` skips every test in this file. The base class
+# is the only thing evaluated at import time, so we fall back to `object`.
 
 
-class FakeAttention(nn.Module):
+class FakeAttention(_Module):
     def __init__(self, d=64):
         super().__init__()
         self.q_proj = nn.Linear(d, d, bias=False)
@@ -31,7 +39,7 @@ class FakeAttention(nn.Module):
         return self.o_proj(self.q_proj(x))
 
 
-class FakeMLP(nn.Module):
+class FakeMLP(_Module):
     def __init__(self, d=64, dff=128):
         super().__init__()
         self.gate_proj = nn.Linear(d, dff, bias=False)
@@ -42,7 +50,7 @@ class FakeMLP(nn.Module):
         return self.down_proj(nn.relu(self.gate_proj(x)) * self.up_proj(x))
 
 
-class FakeTransformerLayer(nn.Module):
+class FakeTransformerLayer(_Module):
     def __init__(self, d=64, dff=128):
         super().__init__()
         self.self_attn = FakeAttention(d)
@@ -54,7 +62,7 @@ class FakeTransformerLayer(nn.Module):
         return x
 
 
-class FakeModel(nn.Module):
+class FakeModel(_Module):
     def __init__(self, n_layers=2, d=64, dff=128):
         super().__init__()
         self.layers = [FakeTransformerLayer(d, dff) for _ in range(n_layers)]

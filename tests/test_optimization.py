@@ -6,8 +6,8 @@ import random
 
 import pytest
 
-from tqai.optimization.genome import PolicyGenome
 from tqai.optimization.ga_policy import GASearch
+from tqai.optimization.genome import PolicyGenome
 
 
 class TestPolicyGenome:

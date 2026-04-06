@@ -7,9 +7,7 @@ monitor can adjust scorer thresholds to compensate.
 
 from __future__ import annotations
 
-import math
 from collections import deque
-from typing import Any
 
 
 class StabilityMonitor:

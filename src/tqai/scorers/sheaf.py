@@ -66,7 +66,9 @@ class SheafScorer:
             self._running_harmonicity = harmonicity
         else:
             alpha = self._ema_decay
-            self._running_harmonicity = alpha * self._running_harmonicity + (1 - alpha) * harmonicity
+            self._running_harmonicity = (
+                alpha * self._running_harmonicity + (1 - alpha) * harmonicity
+            )
 
         # Score: low harmonicity = non-smooth = high information = high score
         # Normalize: harmonicity in [0, inf), map to score in [0, 1]

@@ -73,8 +73,12 @@ select = ["E", "F", "I", "W"]
 "src/tqai/cli.py" = ["E501"]
 "tests/test_e2e_*.py" = ["E501"]
 "tests/test_convert.py" = ["E501"]
+"tests/test_cfg_sharing.py" = ["F841"]   # _ = call(...) intentional
+"tests/test_optimization.py" = ["F841"]  # GA result discarded by design
+"tests/test_paper_gaps.py" = ["F841"]    # roundtrip checks discard intermediates
+"tests/test_sprint4.py" = ["F841"]       # monitor observe() return ignored
 "scripts/*.py" = ["E501", "I001"]
-"benchmarks/*.py" = ["E402"]
+"benchmarks/*.py" = ["E402", "E501", "F841"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["tqai"]

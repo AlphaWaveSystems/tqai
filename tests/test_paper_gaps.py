@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
 import torch
 
@@ -179,11 +178,10 @@ class TestLayerProtection:
         assert result_0[0] == "tiered"  # tagged strategy output
 
     def test_skip_layers_from_config(self, quantizer):
-        from tqai.config import TurboQuantConfig
-        from tqai.pipeline import build_pipeline
-
         import tqai.scorers  # noqa: F401
         import tqai.strategies  # noqa: F401
+        from tqai.config import TurboQuantConfig
+        from tqai.pipeline import build_pipeline
 
         config = TurboQuantConfig(
             bits_k=4, bits_v=2, backend="torch",

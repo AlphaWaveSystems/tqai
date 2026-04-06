@@ -122,4 +122,6 @@ def _relative_norm(delta, reference) -> float:
     if hasattr(delta, "norm"):
         return float(delta.norm()) / (float(reference.norm()) + 1e-10)
     import numpy as np
-    return float(np.linalg.norm(np.asarray(delta))) / (float(np.linalg.norm(np.asarray(reference))) + 1e-10)
+    delta_norm = float(np.linalg.norm(np.asarray(delta)))
+    ref_norm = float(np.linalg.norm(np.asarray(reference)))
+    return delta_norm / (ref_norm + 1e-10)

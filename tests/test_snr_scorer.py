@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import math
-
 import pytest
 import torch
 
 from tqai.backend import get_backend
-from tqai.pipeline.base import ScoredEntry
 from tqai.quantizer import PolarQuantizer
 
 

@@ -77,7 +77,6 @@ class DeltaStrategy:
         quantizer: Any,
         state: dict | None = None,
     ) -> Any:
-        tag = compressed[0]
         is_delta = compressed[1]
 
         if is_delta:

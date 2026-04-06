@@ -21,7 +21,7 @@ import json
 import resource
 import sys
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).parent.parent

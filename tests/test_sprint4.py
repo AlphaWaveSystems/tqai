@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 import torch
-import numpy as np
 
 from tqai.backend import get_backend
 from tqai.pipeline.base import ScoredEntry

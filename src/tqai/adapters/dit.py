@@ -31,7 +31,10 @@ class DiTAdapter:
 
     def get_attention_modules(self, model: Any):
         transformer = getattr(model, "transformer", model)
-        blocks = getattr(transformer, "transformer_blocks", None) or getattr(transformer, "blocks", [])
+        blocks = (
+            getattr(transformer, "transformer_blocks", None)
+            or getattr(transformer, "blocks", [])
+        )
         for i, block in enumerate(blocks):
             # diffusers BasicTransformerBlock has attn1/attn2
             for attn_name in ("attn1", "attn2", "self_attn"):
@@ -45,7 +48,10 @@ class DiTAdapter:
         if config is None:
             return {"head_dim": None, "n_heads": None, "n_kv_heads": None, "n_layers": None}
 
-        n_heads = getattr(config, "num_attention_heads", getattr(config, "attention_head_dim", None))
+        n_heads = getattr(
+            config, "num_attention_heads",
+            getattr(config, "attention_head_dim", None),
+        )
         inner_dim = getattr(config, "inner_dim", None) or getattr(config, "hidden_size", 0)
         head_dim = inner_dim // n_heads if n_heads and inner_dim else None
         n_layers = getattr(config, "num_layers", getattr(config, "num_hidden_layers", None))
