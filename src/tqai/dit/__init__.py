@@ -6,6 +6,7 @@ and inter-step delta compression for diffusers-style video generation.
 
 from tqai.dit.cfg_patch import patch_cfg_sharing, unpatch_cfg_sharing
 from tqai.dit.mps_fixes import patch_mps_compatibility
+from tqai.dit.presets import VideoPreset, get_video_preset, list_presets
 from tqai.dit.vae_memory import estimate_vae_memory, optimize_vae_memory
 
 __all__ = [
@@ -14,4 +15,7 @@ __all__ = [
     "optimize_vae_memory",
     "estimate_vae_memory",
     "patch_mps_compatibility",
+    "VideoPreset",
+    "get_video_preset",
+    "list_presets",
 ]

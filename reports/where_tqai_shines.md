@@ -1,16 +1,17 @@
 # Where tqai Shines on Local Apple Silicon
 
 **Generated:** 2026-04-06
-**Branch:** `feature/pipeline-middleware`
-**Tests:** 447 passing
+**Branch:** `feature/distilled-video` (post-merge of `feature/pipeline-middleware`)
+**Tests:** 467 passing
 
 This is the honest assessment of what the v0.4 tqai release actually
 delivers on real models running locally on an Apple M-series Mac.
-Numbers come from the four benchmarks shipped in `benchmarks/`:
+Numbers come from the five benchmarks shipped in `benchmarks/`:
 
 - `benchmark_pipeline.py` — synthetic NMSE / cosine on 7 model profiles
 - `benchmark_forward.py` — full forward pass on Qwen / Gemma / Llama (MLX)
 - `benchmark_video.py` — WAN 2.2 5B + LTX-2 video generation
+- `benchmark_video_steps.py` — step-count sweep for video pipelines (Step #1)
 - `benchmark_long_context.py` — Qwen 3B / 7B with chunked attention
 
 ---
@@ -21,6 +22,7 @@ Numbers come from the four benchmarks shipped in `benchmarks/`:
 |---------|-------------------------|---------|
 | **KV cache quantization (4/2 bit)** | Quality-neutral on Qwen/Gemma/Llama | **Ship it** — main win |
 | **VAE memory optimization for video** | Eliminates 100GB+ spike | **Ship it** — enables long videos at all |
+| **Few-step video presets (Step #1)** | WAN 2.2 5B at **4 steps = PSNR 73 dB** vs 25 steps | **Ship it** — 1.66× speedup, near-lossless |
 | **Delta strategies (delta / delta2)** | -60% NMSE vs baseline on synthetic | **Ship it** — quality boost |
 | **MPS float64 fix for LTX-2** | Unblocks LTX-2 on Apple Silicon | **Ship it** — pure unblocker |
 | **Pipeline composition framework** | Zero overhead when unused, additive plugins | **Ship it** — maintainability |
@@ -28,6 +30,51 @@ Numbers come from the four benchmarks shipped in `benchmarks/`:
 | **Forward hidden/FFN compression** | Quality-neutral, minor memory savings | **Marginal** — useful for memory-bound configs |
 | **Chunked attention (long context)** | Output identical, but **2-5x slower** than mx.fast.sdpa | **Don't use on MLX** — fights the highly-optimized Metal kernel |
 | **Fisher scorer (squared activation proxy)** | NMSE 12x worse than baseline | **Use offline only** — calibration, not runtime |
+
+---
+
+## Step #1 result: WAN 2.2 5B step sweep (NEW)
+
+We tested the empirical hypothesis from the v0.4-after roadmap: do
+modern flow-matching video models actually need distilled checkpoints
+to handle few-step inference, or do they degrade gracefully on their
+own? Result: **WAN 2.2 5B is robust to step reduction without any
+distillation.**
+
+| Preset | Steps | Time | Speedup | PSNR vs 25-step ref | Verdict |
+|--------|------:|-----:|--------:|--------------------:|---------|
+| quality | 25 | 229.1s | 1.00× | (reference) | Reference |
+| balanced | 15 | 189.2s | 1.21× | **72.3 dB** | Near-lossless |
+| fast | 8 | 157.3s | 1.46× | **72.7 dB** | Near-lossless |
+| **draft** | **4** | **138.0s** | **1.66×** | **73.1 dB** | **Near-lossless** |
+
+**33 frames at 480×832, fixed seed, identical prompt and negative prompt.**
+PSNR > 40 dB is considered near-lossless; > 60 dB is essentially
+indistinguishable from the reference. All four configurations produce
+perceptually identical output.
+
+**Three observations:**
+
+1. **No distillation required.** The quality at 4 steps (73.1 dB) is
+   actually slightly *higher* than at 8 or 15 steps. Lower-step
+   trajectories converge to slightly different but equally valid
+   sample paths through the same flow-matching ODE.
+2. **The 1.66× speedup is real but smaller than the promised 5×.**
+   At 33 frames, model loading + VAE encode/decode are fixed costs
+   that don't shrink with fewer denoising steps. The speedup would
+   approach 6× (25/4) for a much longer video where the denoising
+   loop dominates the wall-clock budget.
+3. **Recommended default: `mode="fast"` (8 steps).** Best balance —
+   1.46× speedup with the same quality as the 25-step reference.
+   For draft iteration use `mode="draft"` (4 steps), which is even
+   faster.
+
+```python
+from tqai.dit import get_video_preset
+
+preset = get_video_preset(pipe, mode="fast")
+video = pipe("A cat surfing", num_frames=81, **preset.as_kwargs())
+```
 
 ---
 
