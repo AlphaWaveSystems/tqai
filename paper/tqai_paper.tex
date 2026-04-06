@@ -143,9 +143,9 @@ The naive cache implementation stores compressed entries and reconstructs the fu
 \caption{Naive Full Reconstruction}
 \begin{algorithmic}[1]
 \FOR{$t = 1, \ldots, n$}
-  \STATE Store $\textsc{Compress}(\text{new\_kv})$
+  \STATE Store $\textnormal{\textsc{Compress}}(\text{new\_kv})$
   \FOR{$i = 1, \ldots, t$}
-    \STATE $\textsc{Decompress}(\text{entry}_i)$ \COMMENT{$O(t)$ work}
+    \STATE $\textnormal{\textsc{Decompress}}(\text{entry}_i)$ \COMMENT{$O(t)$ work}
   \ENDFOR
 \ENDFOR
 \end{algorithmic}
@@ -166,9 +166,9 @@ We maintain a running dequantized buffer alongside compressed storage:
 \caption{Incremental Buffer Reconstruction}
 \begin{algorithmic}[1]
 \FOR{$t = 1, \ldots, n$}
-  \STATE $\text{entry} \gets \textsc{Compress}(\text{new\_kv})$
-  \STATE $\text{buffer} \gets \textsc{Concat}(\text{buffer},\; \textsc{Decompress}(\text{entry}))$ \COMMENT{$O(1)$ dequant}
-  \RETURN $\textsc{Concat}(\text{sink},\; \text{buffer})$
+  \STATE $\text{entry} \gets \textnormal{\textsc{Compress}}(\text{new\_kv})$
+  \STATE $\text{buffer} \gets \textnormal{\textsc{Concat}}(\text{buffer},\; \textnormal{\textsc{Decompress}}(\text{entry}))$ \COMMENT{$O(1)$ dequant}
+  \RETURN $\textnormal{\textsc{Concat}}(\text{sink},\; \text{buffer})$
 \ENDFOR
 \end{algorithmic}
 \end{algorithm}
@@ -192,7 +192,7 @@ Inspired by KIVI~\cite{yuan2024kivi}, we extend the incremental strategy with a 
 \begin{itemize}
   \item Last $R$ tokens kept uncompressed in full precision.
   \item Older tokens compressed $\to$ dequantized into incremental buffer.
-  \item Assembly: $\textsc{Concat}(\text{sink},\; \text{old\_buffer},\; \text{recent\_uncompressed})$.
+  \item Assembly: $\textnormal{\textsc{Concat}}(\text{sink},\; \text{old\_buffer},\; \text{recent\_uncompressed})$.
 \end{itemize}
 
 This provides zero quantization error on the $R$ most recent tokens, which receive the highest attention weights in most transformer architectures.
