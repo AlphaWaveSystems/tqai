@@ -20,7 +20,8 @@ Numbers come from the five benchmarks shipped in `benchmarks/`:
 
 | Feature | Status on Apple Silicon | Verdict |
 |---------|-------------------------|---------|
-| **KV cache quantization (4/2 bit)** | Quality-neutral on Qwen/Gemma/Llama | **Ship it** — main win |
+| **KV cache quantization (4/2 bit) — quality** | Byte-identical to baseline on Qwen/Gemma/Llama (Δppl=0.00) | **Ship it** — quality preservation is real |
+| **KV cache quantization (4/2 bit) — peak runtime memory** | No savings on Apple Silicon (within ±0.2 GB of baseline at 4K–128K), see [`kv_memory_finding.md`](kv_memory_finding.md) | **Honest negative result** — needs fused dequant-attention Metal kernel to unlock |
 | **VAE memory optimization for video** | Eliminates 100GB+ spike | **Ship it** — enables long videos at all |
 | **Few-step video presets (Step #1)** | WAN 2.2 5B at **4 steps = PSNR 73 dB** vs 25 steps | **Ship it** — 1.66× speedup, near-lossless |
 | **Delta strategies (delta / delta2)** | -60% NMSE vs baseline on synthetic | **Ship it** — quality boost |

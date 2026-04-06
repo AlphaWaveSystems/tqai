@@ -10,12 +10,27 @@
 I went into Step #4 expecting to validate the headline v0.3.1 win
 ("K4/V2 saves 80% of KV cache memory") at the scale where it matters
 locally — 100K+ context. Instead, the benchmark reveals that **K4/V2
-saves zero peak runtime memory on Apple Silicon**, and actually uses
-**0.1–0.2 GB more** than baseline at every context length we tested.
+saves essentially zero peak runtime memory on Apple Silicon**, with
+the delta within ±0.2 GB of baseline at every context length we
+tested (4K, 32K, 64K, 128K) and trending slightly **worse** (not
+better) due to fixed overhead from rotation matrices and codebooks.
+
+I cross-validated with two independent measurement methodologies:
+
+1. **Subprocess + `mlx_lm.generate()`** (the `benchmark_kv_memory.py`
+   path): tqai uses **+0.10 to +0.19 GB more** than baseline.
+2. **Direct `model(ids, cache=cache)` with the cache held alive**:
+   tqai uses **+0.07 GB more** than baseline at 32K, with both peaks
+   around 23 GB.
+
+The two methods agree on the core conclusion: tqai's KV compression
+provides **no peak runtime memory benefit**. The exact direction
+(neutral or slightly worse) depends on methodology but is bounded by
+constant overhead.
 
 This is a major correction to how tqai's headline claim should be
-framed. The K4/V2 win is real but it is a **storage/wire/quality** win,
-not a **peak runtime memory** win.
+framed. The K4/V2 win is real but it is a **storage/wire/quality**
+win, not a **peak runtime memory** win.
 
 ## The numbers
 
