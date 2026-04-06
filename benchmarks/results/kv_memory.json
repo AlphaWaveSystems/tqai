@@ -1,0 +1,43 @@
+{
+  "timestamp": "2026-04-06T17:20:56",
+  "model": "mlx-community/Qwen2.5-7B-Instruct-8bit",
+  "bits_k": 4,
+  "bits_v": 2,
+  "contexts": [
+    4096
+  ],
+  "results": [
+    {
+      "config": "baseline",
+      "target_context": 4096,
+      "actual_context": 3845,
+      "bits_k": 0,
+      "bits_v": 0,
+      "model_load_gb": 8.095,
+      "prefill_peak_gb": 8.968,
+      "kv_growth_gb": 0.873,
+      "decode_peak_gb": 8.968,
+      "prefill_time_s": 1.19,
+      "decode_time_s": 0.001,
+      "decode_tokens": 3,
+      "decode_tokens_per_sec": 3000.0,
+      "error": null
+    },
+    {
+      "config": "tqai_k4v2",
+      "target_context": 4096,
+      "actual_context": 3845,
+      "bits_k": 4,
+      "bits_v": 2,
+      "model_load_gb": 8.095,
+      "prefill_peak_gb": 8.998,
+      "kv_growth_gb": 0.903,
+      "decode_peak_gb": 8.998,
+      "prefill_time_s": 1.29,
+      "decode_time_s": 0.001,
+      "decode_tokens": 3,
+      "decode_tokens_per_sec": 3000.0,
+      "error": null
+    }
+  ]
+}

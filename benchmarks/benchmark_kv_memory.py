@@ -1,6 +1,6 @@
 """KV cache memory benchmark — proves the v0.3.1 K4/V2 win at scale.
 
-Measures peak resident set size and prefill throughput on a real model
+Measures peak MLX active memory and prefill throughput on a real model
 (Qwen 2.5-7B Q8 by default) at increasing context lengths, comparing
 baseline mlx-lm with `tqai.patch(model, bits_k=4, bits_v=2)`.
 
@@ -21,6 +21,15 @@ Context length comparison:
       256K  |   15.03 GB      |  2.94 GB | 12.10 GB
       512K  |   30.06 GB      |  5.87 GB | 24.19 GB
 
+Architecture
+============
+Each (context, config) pair runs in its own Python subprocess so that
+MLX memory measurements are isolated. Within each subprocess we use
+mx.get_active_memory() / mx.get_peak_memory() / mx.reset_peak_memory()
+to measure exactly the MLX tensor memory (not Python heap or model
+weights), and we reset the peak watermark between the model-load and
+prefill phases so we can attribute KV cache growth specifically.
+
 Usage:
     python benchmarks/benchmark_kv_memory.py
     python benchmarks/benchmark_kv_memory.py --contexts 32768,131072,262144
@@ -30,24 +39,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import gc
 import json
-import resource
+import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(_REPO_ROOT / "src"))
-
-
-def _rss_gb() -> float:
-    """Process resident set size in GB.
-
-    On macOS, ru_maxrss is reported in bytes (not KB as on Linux).
-    """
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e9
 
 
 # A long passage repeated to hit target token counts. Generic Wikipedia-style
@@ -74,14 +73,6 @@ capabilities that were once the exclusive province of biological intelligence.
 """
 
 
-def _build_prompt(tokenizer, target_tokens: int) -> str:
-    """Build a prompt of approximately ``target_tokens`` tokens."""
-    chunk_tokens = len(tokenizer.encode(PASSAGE))
-    repeats = max(1, (target_tokens - 50) // chunk_tokens)
-    body = PASSAGE * repeats
-    return body + "\n\nSummarize the passage above in one sentence:"
-
-
 @dataclass
 class KVMemoryResult:
     config: str  # "baseline" or "tqai_k4v2"
@@ -89,14 +80,120 @@ class KVMemoryResult:
     actual_context: int
     bits_k: int
     bits_v: int
-    rss_before_load_gb: float
-    rss_after_load_gb: float
-    rss_after_prefill_gb: float
-    rss_peak_gb: float
+    model_load_gb: float       # MLX active memory after model load
+    prefill_peak_gb: float     # MLX peak memory during prefill (KV cache + intermediates)
+    kv_growth_gb: float        # prefill_peak_gb - model_load_gb
+    decode_peak_gb: float      # MLX peak memory during decode (post-reset)
     prefill_time_s: float
-    generation_time_s: float
-    tokens_per_sec: float
+    decode_time_s: float
+    decode_tokens: int
+    decode_tokens_per_sec: float
     error: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Subprocess worker — runs ONE configuration in isolation
+# ---------------------------------------------------------------------------
+
+WORKER_SOURCE = '''
+"""Subprocess worker. Runs a single (model, context, config) measurement."""
+import gc
+import json
+import sys
+import time
+
+# Inputs come via stdin as a JSON dict
+spec = json.loads(sys.stdin.read())
+model_id = spec["model_id"]
+target_context = spec["target_context"]
+use_tqai = spec["use_tqai"]
+bits_k = spec["bits_k"]
+bits_v = spec["bits_v"]
+max_new_tokens = spec["max_new_tokens"]
+passage = spec["passage"]
+
+import mlx.core as mx
+import mlx_lm
+
+import tqai
+
+
+def _build_prompt(tokenizer, target_tokens):
+    chunk_tokens = len(tokenizer.encode(passage))
+    repeats = max(1, (target_tokens - 50) // chunk_tokens)
+    body = passage * repeats
+    return body + "\\n\\nSummarize the passage above in one sentence:"
+
+
+result = {
+    "config": "tqai_k4v2" if use_tqai else "baseline",
+    "target_context": target_context,
+    "bits_k": bits_k if use_tqai else 0,
+    "bits_v": bits_v if use_tqai else 0,
+    "actual_context": 0,
+    "model_load_gb": 0.0,
+    "prefill_peak_gb": 0.0,
+    "kv_growth_gb": 0.0,
+    "decode_peak_gb": 0.0,
+    "prefill_time_s": 0.0,
+    "decode_time_s": 0.0,
+    "decode_tokens": 0,
+    "decode_tokens_per_sec": 0.0,
+    "error": None,
+}
+
+try:
+    mx.reset_peak_memory()
+
+    # Phase 1: load model
+    model, tokenizer = mlx_lm.load(model_id)
+    mx.synchronize()
+    result["model_load_gb"] = round(mx.get_active_memory() / 1e9, 3)
+
+    if use_tqai:
+        tqai.patch(model, bits_k=bits_k, bits_v=bits_v, backend="mlx")
+
+    # Reset peak so the next measurement attributes only KV cache + prefill activations
+    mx.reset_peak_memory()
+
+    # Phase 2: prefill (1 new token)
+    prompt = _build_prompt(tokenizer, target_context)
+    result["actual_context"] = len(tokenizer.encode(prompt))
+
+    t0 = time.perf_counter()
+    _ = mlx_lm.generate(model, tokenizer, prompt=prompt, max_tokens=1, verbose=False)
+    mx.synchronize()
+    result["prefill_time_s"] = round(time.perf_counter() - t0, 2)
+    result["prefill_peak_gb"] = round(mx.get_peak_memory() / 1e9, 3)
+    result["kv_growth_gb"] = round(result["prefill_peak_gb"] - result["model_load_gb"], 3)
+
+    # Phase 3: decode N more tokens (separate measurement)
+    mx.reset_peak_memory()
+    t0 = time.perf_counter()
+    _ = mlx_lm.generate(
+        model, tokenizer, prompt=prompt, max_tokens=max_new_tokens, verbose=False,
+    )
+    mx.synchronize()
+    decode_total = time.perf_counter() - t0
+    # The decode call also redoes prefill, so subtract prefill_time and clamp
+    decode_only = max(decode_total - result["prefill_time_s"], 0.001)
+    result["decode_time_s"] = round(decode_only, 3)
+    result["decode_tokens"] = max_new_tokens
+    result["decode_tokens_per_sec"] = round(max_new_tokens / decode_only, 2)
+    result["decode_peak_gb"] = round(mx.get_peak_memory() / 1e9, 3)
+
+except Exception as e:
+    result["error"] = f"{type(e).__name__}: {e}"[:300]
+
+# Capture peak even on error
+try:
+    if result["prefill_peak_gb"] == 0.0:
+        result["prefill_peak_gb"] = round(mx.get_peak_memory() / 1e9, 3)
+except Exception:
+    pass
+
+print(json.dumps(result))
+'''
 
 
 def _run_one(
@@ -107,108 +204,75 @@ def _run_one(
     bits_v: int,
     max_new_tokens: int,
 ) -> KVMemoryResult:
-    """Run a single configuration and return memory + timing results."""
-    import mlx_lm
+    """Run a single (context, config) measurement in an isolated subprocess."""
+    label = "tqai_k4v2" if use_tqai else "baseline"
+    print(f"  [{label}] launching subprocess...")
 
-    import tqai
+    spec = {
+        "model_id": model_id,
+        "target_context": target_context,
+        "use_tqai": use_tqai,
+        "bits_k": bits_k,
+        "bits_v": bits_v,
+        "max_new_tokens": max_new_tokens,
+        "passage": PASSAGE,
+    }
 
-    rss_before = _rss_gb()
-    print(f"    [load] RSS before: {rss_before:.2f} GB")
+    env_args = [
+        sys.executable,
+        "-c",
+        WORKER_SOURCE,
+    ]
 
+    t0 = time.perf_counter()
     try:
-        model, tokenizer = mlx_lm.load(model_id)
-    except Exception as e:
+        proc = subprocess.run(
+            env_args,
+            input=json.dumps(spec),
+            capture_output=True,
+            text=True,
+            cwd=str(_REPO_ROOT),
+            check=False,
+            timeout=1800,  # 30 min per config
+        )
+    except subprocess.TimeoutExpired:
         return KVMemoryResult(
-            config="tqai_k4v2" if use_tqai else "baseline",
-            target_context=target_context,
-            actual_context=0,
-            bits_k=bits_k if use_tqai else 0,
-            bits_v=bits_v if use_tqai else 0,
-            rss_before_load_gb=rss_before,
-            rss_after_load_gb=0, rss_after_prefill_gb=0, rss_peak_gb=0,
-            prefill_time_s=0, generation_time_s=0, tokens_per_sec=0,
-            error=f"load failed: {e}",
+            config=label, target_context=target_context, actual_context=0,
+            bits_k=bits_k if use_tqai else 0, bits_v=bits_v if use_tqai else 0,
+            model_load_gb=0, prefill_peak_gb=0, kv_growth_gb=0, decode_peak_gb=0,
+            prefill_time_s=0, decode_time_s=0, decode_tokens=0, decode_tokens_per_sec=0,
+            error="TIMEOUT after 30 minutes",
         )
+    elapsed = time.perf_counter() - t0
+    print(f"  [{label}] subprocess done in {elapsed:.0f}s (exit {proc.returncode})")
 
-    rss_after_load = _rss_gb()
-    print(f"    [load] RSS after: {rss_after_load:.2f} GB (model: {rss_after_load - rss_before:.2f} GB)")
+    # The worker prints exactly one JSON line; find it
+    last_json = None
+    for line in proc.stdout.strip().splitlines():
+        line = line.strip()
+        if line.startswith("{") and line.endswith("}"):
+            try:
+                last_json = json.loads(line)
+            except json.JSONDecodeError:
+                continue
 
-    if use_tqai:
-        tqai.patch(model, bits_k=bits_k, bits_v=bits_v, backend="mlx")
-        print(f"    [tqai] patched K{bits_k}/V{bits_v}")
-
-    try:
-        prompt = _build_prompt(tokenizer, target_context)
-        actual_tokens = len(tokenizer.encode(prompt))
-        print(f"    [prompt] {actual_tokens} tokens (target {target_context})")
-
-        # Prefill: time + memory after prefill
-        t0 = time.perf_counter()
-        _ = mlx_lm.generate(model, tokenizer, prompt=prompt, max_tokens=1, verbose=False)
-        prefill_time = time.perf_counter() - t0
-        rss_after_prefill = _rss_gb()
-        print(f"    [prefill] {prefill_time:.1f}s  RSS: {rss_after_prefill:.2f} GB (+{rss_after_prefill - rss_after_load:.2f} GB for KV)")
-
-        # Generate a small number of new tokens to measure decode + peak memory
-        t0 = time.perf_counter()
-        _ = mlx_lm.generate(
-            model, tokenizer, prompt=prompt, max_tokens=max_new_tokens, verbose=False,
-        )
-        gen_time = time.perf_counter() - t0
-        rss_peak = _rss_gb()
-        # Subtract prefill from total to estimate decode-only time
-        decode_time = max(gen_time - prefill_time, 0.001)
-        tps = max_new_tokens / decode_time if decode_time > 0 else 0
-
-    except Exception as e:
-        if use_tqai:
-            tqai.unpatch(model)
-        del model, tokenizer
-        gc.collect()
-        try:
-            import mlx.core as mx
-            mx.metal.clear_cache()
-        except Exception:
-            pass
+    if last_json is None:
+        # Worker died before printing JSON — record stderr
+        err_tail = proc.stderr.strip().splitlines()[-3:] if proc.stderr else ["(no stderr)"]
         return KVMemoryResult(
-            config="tqai_k4v2" if use_tqai else "baseline",
-            target_context=target_context,
-            actual_context=0,
-            bits_k=bits_k if use_tqai else 0,
-            bits_v=bits_v if use_tqai else 0,
-            rss_before_load_gb=round(rss_before, 2),
-            rss_after_load_gb=round(rss_after_load, 2),
-            rss_after_prefill_gb=0, rss_peak_gb=round(_rss_gb(), 2),
-            prefill_time_s=0, generation_time_s=0, tokens_per_sec=0,
-            error=f"{type(e).__name__}: {e}"[:200],
+            config=label, target_context=target_context, actual_context=0,
+            bits_k=bits_k if use_tqai else 0, bits_v=bits_v if use_tqai else 0,
+            model_load_gb=0, prefill_peak_gb=0, kv_growth_gb=0, decode_peak_gb=0,
+            prefill_time_s=0, decode_time_s=0, decode_tokens=0, decode_tokens_per_sec=0,
+            error=f"worker died (exit {proc.returncode}): " + " | ".join(err_tail),
         )
 
-    if use_tqai:
-        tqai.unpatch(model)
+    return KVMemoryResult(**last_json)
 
-    del model, tokenizer
-    gc.collect()
-    try:
-        import mlx.core as mx
-        mx.metal.clear_cache()
-    except Exception:
-        pass
 
-    return KVMemoryResult(
-        config="tqai_k4v2" if use_tqai else "baseline",
-        target_context=target_context,
-        actual_context=actual_tokens,
-        bits_k=bits_k if use_tqai else 0,
-        bits_v=bits_v if use_tqai else 0,
-        rss_before_load_gb=round(rss_before, 2),
-        rss_after_load_gb=round(rss_after_load, 2),
-        rss_after_prefill_gb=round(rss_after_prefill, 2),
-        rss_peak_gb=round(rss_peak, 2),
-        prefill_time_s=round(prefill_time, 1),
-        generation_time_s=round(gen_time, 1),
-        tokens_per_sec=round(tps, 1),
-    )
-
+# ---------------------------------------------------------------------------
+# Top-level driver
+# ---------------------------------------------------------------------------
 
 def run_benchmark(
     model_id: str,
@@ -219,12 +283,12 @@ def run_benchmark(
     output_path: str = "benchmarks/results/kv_memory.json",
 ) -> list[KVMemoryResult]:
     print(f"\n{'=' * 80}")
-    print("tqai KV Cache Memory Benchmark — proves the v0.3.1 K4/V2 win at scale")
+    print("tqai KV Cache Memory Benchmark")
     print(f"{'=' * 80}")
     print(f"Model:        {model_id}")
     print(f"Contexts:     {contexts}")
     print(f"Compression:  K{bits_k}/V{bits_v}")
-    print(f"Max new tok:  {max_new_tokens} (we measure prefill memory, not generation)")
+    print("Memory metric: mx.get_peak_memory() (MLX-native, isolated per subprocess)")
     print(f"{'=' * 80}\n")
 
     results: list[KVMemoryResult] = []
@@ -232,8 +296,6 @@ def run_benchmark(
     for ctx in contexts:
         print(f"\n--- Context: {ctx} tokens ---")
         for use_tqai in (False, True):
-            label = "tqai_k4v2" if use_tqai else "baseline"
-            print(f"  [{label}]")
             result = _run_one(
                 model_id, ctx, use_tqai, bits_k, bits_v, max_new_tokens,
             )
@@ -242,8 +304,10 @@ def run_benchmark(
                 print(f"    ERROR: {result.error}")
             else:
                 print(
-                    f"    DONE  prefill={result.prefill_time_s}s "
-                    f"peak={result.rss_peak_gb}GB  decode={result.tokens_per_sec}tok/s"
+                    f"    OK    actual_ctx={result.actual_context}  "
+                    f"model={result.model_load_gb}G  prefill_peak={result.prefill_peak_gb}G  "
+                    f"kv={result.kv_growth_gb}G  prefill={result.prefill_time_s}s  "
+                    f"decode={result.decode_tokens_per_sec}tok/s"
                 )
 
     out_path = Path(output_path)
@@ -267,12 +331,12 @@ def _print_summary(results: list[KVMemoryResult]):
     print("KV CACHE MEMORY BENCHMARK SUMMARY")
     print(f"{'=' * 80}")
     print(
-        f"{'Context':>9} {'Config':<12} {'After load':>11} {'After prefill':>14} "
-        f"{'Peak':>8} {'KV size':>9} {'Status':<10}"
+        f"{'Context':>9} {'Config':<12} {'Model':>9} {'Prefill peak':>13} "
+        f"{'KV growth':>11} {'Status':<10}"
     )
     print(
-        f"{'-' * 9} {'-' * 12} {'-' * 11} {'-' * 14} "
-        f"{'-' * 8} {'-' * 9} {'-' * 10}"
+        f"{'-' * 9} {'-' * 12} {'-' * 9} {'-' * 13} "
+        f"{'-' * 11} {'-' * 10}"
     )
 
     contexts = sorted(set(r.target_context for r in results))
@@ -282,29 +346,23 @@ def _print_summary(results: list[KVMemoryResult]):
             if r.error:
                 print(
                     f"{r.target_context:>9} {r.config:<12} "
-                    f"{r.rss_after_load_gb:>10.2f}G {'---':>14} "
-                    f"{r.rss_peak_gb:>7.2f}G {'---':>9} OOM/ERROR"
+                    f"{'---':>9} {'---':>13} {'---':>11} OOM/ERROR"
                 )
             else:
-                kv_size = r.rss_after_prefill_gb - r.rss_after_load_gb
                 print(
                     f"{r.target_context:>9} {r.config:<12} "
-                    f"{r.rss_after_load_gb:>10.2f}G {r.rss_after_prefill_gb:>13.2f}G "
-                    f"{r.rss_peak_gb:>7.2f}G {kv_size:>8.2f}G OK"
+                    f"{r.model_load_gb:>8.2f}G {r.prefill_peak_gb:>12.2f}G "
+                    f"{r.kv_growth_gb:>10.2f}G OK"
                 )
 
-        # Compute the savings if both succeeded
         baseline = next((r for r in ctx_results if r.config == "baseline" and r.error is None), None)
         tqai = next((r for r in ctx_results if r.config == "tqai_k4v2" and r.error is None), None)
         if baseline and tqai:
-            kv_baseline = baseline.rss_after_prefill_gb - baseline.rss_after_load_gb
-            kv_tqai = tqai.rss_after_prefill_gb - tqai.rss_after_load_gb
-            saved = kv_baseline - kv_tqai
-            ratio = (kv_baseline / kv_tqai) if kv_tqai > 0 else 0
+            saved = baseline.kv_growth_gb - tqai.kv_growth_gb
+            ratio = (baseline.kv_growth_gb / tqai.kv_growth_gb) if tqai.kv_growth_gb > 0 else 0
             print(
                 f"{'':>9} {'Δ savings':<12} "
-                f"{'':>11} {'':>14} "
-                f"{'':>8} {saved:>+7.2f}G ({ratio:.1f}x reduction)"
+                f"{'':>9} {'':>13} {saved:>+10.2f}G  ({ratio:.1f}x reduction)"
             )
         print()
 
