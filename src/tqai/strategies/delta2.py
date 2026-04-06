@@ -8,7 +8,9 @@ Falls back to first-order delta when second-order is not yet available
 (first two steps), and to full compression when deltas are large.
 
 References:
-    - QuantSparse: second-order residual quantization
+    - QuantSparse: arXiv:2509.23681 (second-order residual quantization
+      for Wan2.1 KV cache; the second-order Δ² formulation here is
+      directly inspired by their reparameterization)
     - TurboQuant: arXiv:2504.19874
 """
 
