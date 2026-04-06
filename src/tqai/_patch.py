@@ -8,9 +8,11 @@ def _patch(model, config: TurboQuantConfig):
     detected = config.backend or detect_backend()
 
     if detected == "mlx":
-        from tqai.cache.mlx import patch_mlx
+        # Only patch the cache when KV compression is requested
+        if config.kv_compression:
+            from tqai.cache.mlx import patch_mlx
 
-        patch_mlx(model, config)
+            patch_mlx(model, config)
 
         # Forward-pass activation compression (MLX)
         if config.has_forward_compression:
@@ -37,9 +39,11 @@ def _patch(model, config: TurboQuantConfig):
 
         return None
 
-    from tqai.cache.hf import TurboQuantDynamicCache
+    cache = None
+    if config.kv_compression:
+        from tqai.cache.hf import TurboQuantDynamicCache
 
-    cache = TurboQuantDynamicCache(config)
+        cache = TurboQuantDynamicCache(config)
 
     # Attach forward-pass activation compression hooks (PyTorch only)
     if config.has_forward_compression:
@@ -69,10 +73,9 @@ def _unpatch(model):
 
     # Remove chunked attention patch
     if hasattr(model, "_tqai_original_sdpa"):
-        import mlx_lm.models.base as base_module
+        from tqai.attention import unpatch_chunked_attention
 
-        base_module.scaled_dot_product_attention = model._tqai_original_sdpa
-        del model._tqai_original_sdpa
+        unpatch_chunked_attention(model)
 
     # Remove MLX cache patch
     if hasattr(model, "_tqai_original_make_prompt_cache"):

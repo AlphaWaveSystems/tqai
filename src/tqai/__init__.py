@@ -33,6 +33,9 @@ def patch(
     # Chunked attention (v0.4.0)
     chunk_attention: bool = False,
     attention_chunk_size: int = 4096,
+    # KV cache compression toggle — set False to use only chunked attention
+    # or forward hooks without quantizing the KV cache.
+    kv_compression: bool = True,
 ):
     """Enable TurboQuant compression on a model.
 
@@ -104,6 +107,7 @@ def patch(
         pipeline=pipeline,
         chunk_attention=chunk_attention,
         attention_chunk_size=attention_chunk_size,
+        kv_compression=kv_compression,
     )
     return _patch(model, config)
 

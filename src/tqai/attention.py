@@ -92,8 +92,13 @@ def chunked_scaled_dot_product_attention(
 
         # Apply mask for this chunk
         if causal:
-            # For each query position q_pos, mask out kv positions > q_pos
-            q_pos = mx.arange(T_q).reshape(1, 1, T_q, 1)
+            # Query at relative position i is at absolute position (T_kv - T_q + i).
+            # It can attend to kv positions p where p <= T_kv - T_q + i.
+            # During prefill: T_q == T_kv, so q_offset == 0 (query i is at abs i).
+            # During decode: T_q == 1, T_kv == seq_len, so q_offset == seq_len - 1
+            # (the single new query is at the end of the sequence).
+            q_offset = T_kv - T_q
+            q_pos = mx.arange(T_q).reshape(1, 1, T_q, 1) + q_offset
             kv_pos = mx.arange(chunk_start, chunk_end).reshape(1, 1, 1, -1)
             causal_mask = mx.where(kv_pos <= q_pos, 0.0, -1e9)
             scores = scores + causal_mask
@@ -126,14 +131,18 @@ def chunked_scaled_dot_product_attention(
 def patch_chunked_attention(model, chunk_size: int = 4096) -> None:
     """Monkey-patch mlx-lm's SDPA to use chunked attention for long sequences.
 
-    Replaces ``mlx_lm.models.base.scaled_dot_product_attention`` with a
-    wrapper that routes to :func:`chunked_scaled_dot_product_attention`
-    when the KV sequence length exceeds ``chunk_size``.
+    Replaces ``scaled_dot_product_attention`` in ``mlx_lm.models.base`` *and*
+    in every loaded model module (qwen2, llama, etc.) that imported the
+    symbol at load time.  Without this multi-module patching, model files
+    that did ``from .base import scaled_dot_product_attention`` would still
+    call the original function via their local binding.
 
     Args:
         model: The mlx-lm model (used to store restore reference).
         chunk_size: KV tokens per chunk (default 4096).
     """
+    import sys
+
     import mlx_lm.models.base as base_module
 
     original_sdpa = base_module.scaled_dot_product_attention
@@ -152,5 +161,43 @@ def patch_chunked_attention(model, chunk_size: int = 4096) -> None:
             mask=mask, sinks=sinks,
         )
 
+    # Patch the canonical location
     base_module.scaled_dot_product_attention = chunked_sdpa_wrapper
+
+    # Patch all already-imported model modules that have a local binding
+    patched_modules: list[str] = []
+    for module_name, module in list(sys.modules.items()):
+        if not module_name.startswith("mlx_lm.models.") or module is None:
+            continue
+        if module_name == "mlx_lm.models.base":
+            continue
+        existing = getattr(module, "scaled_dot_product_attention", None)
+        if existing is original_sdpa:
+            module.scaled_dot_product_attention = chunked_sdpa_wrapper
+            patched_modules.append(module_name)
+
     model._tqai_original_sdpa = original_sdpa
+    model._tqai_patched_modules = patched_modules
+
+
+def unpatch_chunked_attention(model) -> None:
+    """Restore the original ``scaled_dot_product_attention`` everywhere."""
+    import sys
+
+    if not hasattr(model, "_tqai_original_sdpa"):
+        return
+
+    original_sdpa = model._tqai_original_sdpa
+    patched_modules = getattr(model, "_tqai_patched_modules", [])
+
+    import mlx_lm.models.base as base_module
+    base_module.scaled_dot_product_attention = original_sdpa
+
+    for module_name in patched_modules:
+        module = sys.modules.get(module_name)
+        if module is not None:
+            module.scaled_dot_product_attention = original_sdpa
+
+    del model._tqai_original_sdpa
+    if hasattr(model, "_tqai_patched_modules"):
+        del model._tqai_patched_modules

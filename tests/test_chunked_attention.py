@@ -147,6 +147,57 @@ def test_gqa_support(rng):
     )
 
 
+def test_decode_step_causal(rng):
+    """Regression test: T_q=1 (decode mode) with causal mask must produce
+    the same output as full SDPA. This catches the case where a single
+    query is at position T_kv-1 and should attend to all KV positions.
+    """
+    from tqai.attention import chunked_scaled_dot_product_attention
+
+    B, H, D = 1, 4, 64
+    T_kv = 256  # large enough to span multiple chunks at chunk_size=64
+    chunk_size = 64
+
+    q = mx.random.normal((B, H, 1, D), key=rng)  # T_q == 1 (decode)
+    k = mx.random.normal((B, H, T_kv, D), key=rng)
+    v = mx.random.normal((B, H, T_kv, D), key=rng)
+    scale = 1.0 / (D ** 0.5)
+
+    # Reference: query at position T_kv-1 should see all KV positions
+    out_ref = mx.fast.scaled_dot_product_attention(q, k, v, scale=scale, mask="causal")
+
+    # Chunked
+    out_chunked = chunked_scaled_dot_product_attention(
+        q, k, v, scale=scale, mask="causal", chunk_size=chunk_size,
+    )
+
+    diff = mx.max(mx.abs(out_ref - out_chunked))
+    assert float(diff) < 1e-3, f"Decode chunked SDPA differs from full SDPA: max_diff={float(diff)}"
+
+
+def test_decode_step_multiple_positions(rng):
+    """Decode mode with T_q > 1 (e.g., partial prefill continuation)."""
+    from tqai.attention import chunked_scaled_dot_product_attention
+
+    B, H, D = 1, 4, 64
+    T_q = 8
+    T_kv = 256
+    chunk_size = 64
+
+    q = mx.random.normal((B, H, T_q, D), key=rng)
+    k = mx.random.normal((B, H, T_kv, D), key=rng)
+    v = mx.random.normal((B, H, T_kv, D), key=rng)
+    scale = 1.0 / (D ** 0.5)
+
+    out_ref = mx.fast.scaled_dot_product_attention(q, k, v, scale=scale, mask="causal")
+    out_chunked = chunked_scaled_dot_product_attention(
+        q, k, v, scale=scale, mask="causal", chunk_size=chunk_size,
+    )
+
+    diff = mx.max(mx.abs(out_ref - out_chunked))
+    assert float(diff) < 1e-3, f"Multi-query decode differs from full SDPA: max_diff={float(diff)}"
+
+
 @pytest.mark.parametrize("chunk_size", [32, 128, 512])
 def test_various_chunk_sizes(chunk_size, rng):
     """Different chunk sizes all produce correct results."""

@@ -39,6 +39,11 @@ class TurboQuantConfig:
     chunk_attention: bool = False
     attention_chunk_size: int = 4096
 
+    # KV cache compression on/off (v0.4)
+    # Set to False to use only chunked attention or forward hooks without
+    # touching the KV cache.
+    kv_compression: bool = True
+
     _VALID_STRATEGIES = {"auto", "incremental", "residual", "full"}
 
     def __post_init__(self):
