@@ -217,6 +217,19 @@ QJL trades bias reduction for added variance. For softmax-based attention, varia
 
 ## v0.4 — Composable Pipeline Architecture
 
+> **Contributors welcome — bring your paper.** The whole point of the v0.4
+> restructuring is to make integrating new compression research a one-file
+> change. The core (`quantizer.py`, `cache/hf.py`, `cache/mlx.py`,
+> `kernels/`) is **frozen and stable** — every recent paper we tracked
+> (TurboQuant, QuantSparse, DiTFastAttn, BSA, Sheaf, Copresheaf, Fisher,
+> SparseDiT) ships as a plugin in `scorers/`, `strategies/`, `monitors/`,
+> or `adapters/` without touching the proven core. If you're publishing or
+> reproducing a KV/attention compression paper, the friction to ship it
+> here is a single file plus one line of registration. We actively
+> encourage PRs that add new papers — see the Paper Playground below for
+> the existing references and the "Adding a new paper" example for the
+> exact 5-minute workflow.
+
 v0.4 introduces a plugin-based pipeline so adding a new compression paper
 costs **one file** instead of refactoring `quantizer.py`/`hf.py`/`mlx.py`.
 The default path (`pipeline=None`) is byte-identical to v0.3.1 — zero
@@ -547,6 +560,25 @@ This library implements the TurboQuant algorithm from Google Research:
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). All commits require a DCO sign-off (`git commit -s`).
+
+**Paper integrations are explicitly welcome.** If you're working on a KV
+cache, attention, or diffusion compression paper, the v0.4 architecture
+is designed so you can land a reference implementation as a single file
+without touching `quantizer.py`, `cache/`, or any other core module.
+The fast path:
+
+1. Pick the right slot — `scorers/` (per-token importance), `strategies/`
+   (how to compress), `monitors/` (runtime adaptation), or `adapters/`
+   (a new model family).
+2. Implement the matching protocol from `pipeline/base.py` (3-4 methods).
+3. Register your plugin with one line in the directory's `__init__.py`.
+4. Add tests in `tests/` and a row to the Paper Playground table above.
+5. Open a PR — the core stays untouched, so review is fast.
+
+The point of the freeze on the core is reproducibility: the
+`PolarQuantizer` math, the Lloyd-Max codebooks, and the cache strategies
+have been benchmarked across 6+ models with `Δppl=0.00`. New ideas
+should compose with that baseline, not replace it.
 
 ## License
 
