@@ -76,7 +76,8 @@ class ForwardCompressionHooks:
         self._handles.clear()
         self._quantizers.clear()
 
-    def _get_quantizer(self, module_id: int, key: str, dim: int, bits: int) -> Any:
+    def _get_quantizer(self, module_id: int, key: str, dim: int, bits: int,
+                        device: str | None = None) -> Any:
         """Lazily create and cache a PolarQuantizer for a given (module, tensor) pair."""
         from tqai.backend import get_backend
         from tqai.quantizer import PolarQuantizer
@@ -84,26 +85,31 @@ class ForwardCompressionHooks:
         if module_id not in self._quantizers:
             self._quantizers[module_id] = {}
         cache = self._quantizers[module_id]
-        if key not in cache:
-            ops = get_backend("torch")
-            cache[key] = PolarQuantizer(head_dim=dim, bits=bits, seed=self._config.seed, ops=ops)
-        return cache[key]
+        cache_key = f"{key}_{device or 'cpu'}"
+        if cache_key not in cache:
+            ops = get_backend("torch", device=device)
+            cache[cache_key] = PolarQuantizer(
+                head_dim=dim, bits=bits, seed=self._config.seed, ops=ops
+            )
+        return cache[cache_key]
 
     def _compress_tensor(self, x: Any, module_id: int, key: str, bits: int) -> Any:
         """Round-trip: quantize then dequantize a tensor, preserving shape and dtype."""
+        import torch
 
         orig_dtype = x.dtype
         orig_shape = x.shape
-
-        # Reshape to 2D: (batch * tokens, dim)
         dim = orig_shape[-1]
-        x_2d = x.reshape(-1, dim).float()
+
+        # Quantize on CPU (rotation matrix and codebook ops are CPU-based)
+        x_2d = x.detach().cpu().reshape(-1, dim).float()
 
         pq = self._get_quantizer(module_id, key, dim, bits)
         indices, norms = pq.quantize(x_2d)
         x_hat = pq.dequantize(indices, norms)
 
-        return x_hat.reshape(orig_shape).to(orig_dtype)
+        device = x.device if hasattr(x, "device") else torch.device("cpu")
+        return x_hat.reshape(orig_shape).to(dtype=orig_dtype, device=device)
 
     def _attach_attention_hooks(self, name: str, module) -> None:
         """Attach pre-hook to compress hidden states entering attention."""
