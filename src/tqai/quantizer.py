@@ -66,8 +66,7 @@ class PolarQuantizer:
         self._centroids = self.ops.from_numpy(centroids_np)
 
         self._use_metal = False
-        is_power_of_2 = head_dim & (head_dim - 1) == 0
-        if is_power_of_2 and hasattr(self.ops, "quantize_fused"):
+        if hasattr(self.ops, "quantize_fused"):
             try:
                 from tqai.kernels import metal_available
 

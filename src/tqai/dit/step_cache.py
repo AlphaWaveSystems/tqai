@@ -110,13 +110,18 @@ class TextEncoderCache:
         dim = orig_shape[-1]
 
         if self._quantizer is None:
-            ops = get_backend("torch", device="cpu")
+            ops = get_backend("torch")
             self._quantizer = PolarQuantizer(
                 head_dim=dim, bits=self._bits, seed=self._seed, ops=ops
             )
 
-        # Move to CPU for quantization (rotation matrix is on CPU)
-        x_2d = tensor.detach().cpu().reshape(-1, dim).float()
+        # Move rotation/centroids to tensor's device on first use
+        if hasattr(self._quantizer._rotation, "device"):
+            if self._quantizer._rotation.device != tensor.device:
+                self._quantizer._rotation = self._quantizer._rotation.to(tensor.device)
+                self._quantizer._centroids = self._quantizer._centroids.to(tensor.device)
+
+        x_2d = tensor.reshape(-1, dim).float()
         indices, norms = self._quantizer.quantize(x_2d)
         return (indices, norms, orig_shape, orig_dtype, tensor.device)
 

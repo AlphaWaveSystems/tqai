@@ -153,9 +153,6 @@ def metal_quantize(
     """
     orig_shape = x.shape
     D = orig_shape[-1]
-    if D & (D - 1) != 0:
-        raise ValueError(f"Metal kernel requires power-of-2 head_dim, got {D}")
-
     n_levels = centroids.shape[0]
     num_vecs = x.size // D
     x_flat = mx.reshape(x.astype(mx.float32), (-1,))
