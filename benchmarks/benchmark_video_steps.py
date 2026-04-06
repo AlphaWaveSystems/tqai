@@ -84,13 +84,12 @@ def _save_video(output, path: Path):
 
 def _run_wan_sweep(num_frames: int, output_dir: Path, seed: int) -> list[StepBenchResult]:
     import torch
-
     from diffusers import WanPipeline
 
-    from tqai.dit import get_video_preset, list_presets, optimize_vae_memory
+    from tqai.dit import list_presets, optimize_vae_memory
 
     print("\n=== WAN 2.2 5B step sweep ===")
-    print(f"Loading Wan-AI/Wan2.2-TI2V-5B-Diffusers...")
+    print("Loading Wan-AI/Wan2.2-TI2V-5B-Diffusers...")
     pipe = WanPipeline.from_pretrained(
         "Wan-AI/Wan2.2-TI2V-5B-Diffusers", torch_dtype=torch.bfloat16,
     )
@@ -164,18 +163,16 @@ def _run_wan_sweep(num_frames: int, output_dir: Path, seed: int) -> list[StepBen
 
 def _run_ltx_sweep(num_frames: int, output_dir: Path, seed: int) -> list[StepBenchResult]:
     import torch
-
     from diffusers import LTX2Pipeline
 
     from tqai.dit import (
-        get_video_preset,
         list_presets,
         optimize_vae_memory,
         patch_mps_compatibility,
     )
 
     print("\n=== LTX-2 step sweep ===")
-    print(f"Loading Lightricks/LTX-2...")
+    print("Loading Lightricks/LTX-2...")
     pipe = LTX2Pipeline.from_pretrained(
         "Lightricks/LTX-2", torch_dtype=torch.bfloat16,
     )
