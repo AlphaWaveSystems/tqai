@@ -309,6 +309,71 @@ def cmd_convert(args):
     )
 
 
+def cmd_calibrate(args):
+    """Run offline gradient-based Fisher Information calibration on a HF model."""
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    from tqai.optimization.fisher_calibration import calibrate_fisher
+
+    # Default calibration prompts — generic, broad-domain coverage
+    default_prompts = [
+        "The history of computing began with mechanical calculators.",
+        "Machine learning is the study of algorithms that learn from data.",
+        "Photosynthesis converts sunlight into chemical energy in plants.",
+        "The French Revolution began in 1789 and reshaped European politics.",
+        "Quantum mechanics describes the behavior of matter at the smallest scales.",
+        "Climate change is driven by greenhouse gas emissions from human activity.",
+        "The human brain contains approximately 86 billion neurons.",
+        "Software engineering is both a craft and a discipline.",
+        "Music theory explains the relationships between pitches and rhythms.",
+        "Economics studies how societies allocate scarce resources.",
+        "The genetic code is read in triplets called codons.",
+        "Artificial neural networks are loosely inspired by biological neurons.",
+        "The speed of light in vacuum is approximately 299,792 kilometers per second.",
+        "Plate tectonics explains the slow movement of continents over time.",
+        "Linear algebra underlies most of modern machine learning.",
+        "The internet emerged from research projects in the 1960s and 1970s.",
+    ]
+
+    prompts = default_prompts[: args.num_samples]
+    if args.prompts_file:
+        from pathlib import Path
+        prompts = Path(args.prompts_file).read_text().strip().splitlines()
+        prompts = [p for p in prompts if p.strip()][: args.num_samples]
+
+    print(f"Loading {args.model}...")
+    import time
+    t0 = time.perf_counter()
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+
+    try:
+        import torch
+        model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.float32)
+    except Exception:
+        model = AutoModelForCausalLM.from_pretrained(args.model)
+    print(f"Loaded in {time.perf_counter() - t0:.1f}s")
+
+    print(f"Calibrating with {len(prompts)} prompts (max_length={args.max_length})...")
+    t0 = time.perf_counter()
+    cal = calibrate_fisher(
+        model=model,
+        tokenizer=tokenizer,
+        prompts=prompts,
+        output_path=args.output,
+        max_length=args.max_length,
+        notes=f"Calibrated via tqai calibrate CLI on {args.num_samples} samples",
+    )
+    print(f"Calibration done in {time.perf_counter() - t0:.1f}s")
+    print(f"  Layers:  {cal.num_layers}")
+    print(f"  Samples: {cal.num_samples}")
+    print(f"  Saved:   {args.output}")
+    print()
+    print("Per-layer Fisher (K projection):")
+    for i, v in enumerate(cal.layer_fisher_k):
+        bar = "#" * int(min(v / max(cal.layer_fisher_k) * 40, 40)) if max(cal.layer_fisher_k) > 0 else ""
+        print(f"  layer {i:>3}: {v:.6e}  {bar}")
+
+
 def cmd_benchmark(args):
     """Run quantization accuracy benchmark."""
     from tqai.backend import get_backend
@@ -459,6 +524,27 @@ def main():
     conv.add_argument("--seed", type=int, default=42, help="RNG seed (default: 42)")
     conv.add_argument("--backend", default=None, help="torch or mlx (auto)")
 
+    # calibrate
+    cal = sub.add_parser(
+        "calibrate",
+        help="Run offline gradient-based Fisher calibration (PyTorch only)",
+    )
+    cal.add_argument("--model", "-m", required=True, help="HuggingFace model ID")
+    cal.add_argument("--output", "-o", required=True, help="Output JSON path")
+    cal.add_argument(
+        "--num-samples", type=int, default=16,
+        help="Number of calibration prompts (default: 16, max: built-in default set)",
+    )
+    cal.add_argument(
+        "--max-length", type=int, default=512,
+        help="Maximum tokens per calibration prompt (default: 512)",
+    )
+    cal.add_argument(
+        "--prompts-file", default=None,
+        help="Optional path to a text file with one prompt per line "
+             "(overrides the built-in defaults)",
+    )
+
     args = parser.parse_args()
     if args.command == "info":
         cmd_info(args)
@@ -472,6 +558,8 @@ def main():
         cmd_compare(args)
     elif args.command == "convert":
         cmd_convert(args)
+    elif args.command == "calibrate":
+        cmd_calibrate(args)
     else:
         parser.print_help()
 

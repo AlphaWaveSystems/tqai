@@ -258,7 +258,7 @@ overhead, all 293 pre-v0.4 tests pass unchanged.
 ```
 tqai.patch(model, pipeline={"scorer": "...", "strategy": "...", "monitor": "..."})
    │
-   ├─ Scorer       — per-token importance (palm, snr, fisher, sheaf, bsa)
+   ├─ Scorer       — per-token importance (palm, snr, fisher, fisher_static, sheaf, bsa)
    ├─ Strategy     — how to compress  (tiered, delta, delta2, window, cfg_sharing)
    ├─ Monitor      — runtime adjustment (stability, lyapunov)
    ├─ Adapter      — model family      (llm, dit, wan)
@@ -305,7 +305,7 @@ framework to drop in your own.
 |-------|--------|--------|------------|
 | **TurboQuant** ([arXiv:2504.19874](https://arxiv.org/abs/2504.19874), Zandieh et al., ICLR 2026) | `palm` scorer | `scorers/palm.py` | EMA novelty/surprise scoring |
 | **Min-SNR Weighting** ([arXiv:2303.09556](https://arxiv.org/abs/2303.09556), Hang et al., ICCV 2023) | `snr` scorer | `scorers/snr.py` | Cosine + linear diffusion schedule scoring |
-| **APTQ** ([arXiv:2402.14866](https://arxiv.org/abs/2402.14866), Guan et al., DAC 2024) + **Fisher Information** ([arXiv:1906.08589](https://arxiv.org/abs/1906.08589), Frantar et al.) | `fisher` scorer | `scorers/fisher.py` | Squared activation proxy for FIM diagonal |
+| **APTQ** ([arXiv:2402.14866](https://arxiv.org/abs/2402.14866), Guan et al., DAC 2024) + **Fisher Information** ([arXiv:1906.08589](https://arxiv.org/abs/1906.08589), Frantar et al.) | `fisher` (runtime proxy, broken) + **`fisher_static`** (offline calibration, works) | `scorers/fisher.py`, `scorers/fisher_static.py`, `optimization/fisher_calibration.py` | Two implementations: the runtime `fisher` uses `mean(x²)` proxy and over-allocates bits (don't use); the offline `calibrate_fisher()` does real forward+backward passes on a calibration set, computes per-layer K/V Fisher diagonals, saves to JSON; the `fisher_static` scorer loads the JSON and serves precomputed scores at runtime (constant-time lookup, no per-call overhead) |
 | **Sheaf Attention** ([arXiv:2601.21207](https://arxiv.org/abs/2601.21207), AAAI 2026) | `sheaf` scorer | `scorers/sheaf.py` | Discrete Laplacian harmonicity classifier |
 | **BSA — Bidirectional Sparse Attention** ([arXiv:2509.01085](https://arxiv.org/abs/2509.01085)) | `bsa` scorer | `scorers/bsa.py` | Block centroid saliency (KV side only) |
 | **TurboQuant** tiered allocation | `tiered` strategy | `strategies/tiered.py` | Dual-quantizer routing by score |
@@ -371,7 +371,8 @@ print(best.decode(scorers, strategies, monitors))
 | Pipeline framework (`pipeline=None` default) | **Ship it** — zero overhead, +ergonomics |
 | `cfg_sharing` strategy | **Functional, no speedup** — Python overhead == compute saved |
 | `chunk_attention=True` (MLX) | **Don't use** — fused Metal kernel wins; 3-5× slower |
-| `fisher` scorer (squared activation proxy) | **Use offline only** — runtime proxy is too aggressive |
+| `fisher` scorer (runtime, squared activation proxy) | **Don't use** — over-allocates bits (NMSE 12× worse than baseline) |
+| `fisher_static` scorer + `tqai calibrate` (v0.4) | **Ship it** — proper offline gradient-based Fisher calibration, constant-time runtime lookup |
 
 Full benchmark write-up: [`reports/where_tqai_shines.md`](reports/where_tqai_shines.md).
 Paper coverage matrix: [`reports/paper_coverage_report.md`](reports/paper_coverage_report.md).
@@ -406,6 +407,60 @@ video = pipe("A cat surfing", num_frames=81)
 
 ---
 
+## Offline Fisher Information Calibration (v0.4)
+
+The runtime `fisher` scorer uses `mean(x²)` as a proxy for the Fisher
+Information diagonal. This proxy over-allocates bits and routes
+everything to the high-bit tier (NMSE 12× worse than baseline in our
+synthetic benchmark). The fix is **offline gradient-based calibration**:
+run a small calibration set through forward+backward passes once,
+collect real per-layer K/V Fisher diagonals, save to JSON, then load
+the JSON at runtime via the `fisher_static` scorer.
+
+```bash
+# Step 1: calibrate (PyTorch only, ~seconds for small models)
+tqai calibrate --model Qwen/Qwen2.5-3B-Instruct --output qwen-3b-fisher.json
+```
+
+```python
+# Step 2: use the calibration at inference time
+import tqai
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-3B-Instruct")
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B-Instruct")
+
+cache = tqai.patch(
+    model,
+    bits_k=4, bits_v=2,
+    pipeline={
+        "scorer": "fisher_static",
+        "scorer_kwargs": {"calibration_path": "qwen-3b-fisher.json"},
+        "strategy": "tiered",
+    },
+)
+```
+
+The static scorer is a constant-time dictionary lookup at runtime — no
+gradient computation, no proxy, no per-call overhead. The calibration
+JSON encodes per-layer importance derived from real `∂L/∂θ` measurements.
+
+For programmatic use:
+
+```python
+from tqai.optimization import calibrate_fisher
+
+cal = calibrate_fisher(
+    model=model,
+    tokenizer=tokenizer,
+    prompts=["...", "...", "..."],   # 8-32 prompts is enough
+    output_path="my-fisher.json",
+)
+print(f"Calibrated {cal.num_layers} layers from {cal.num_samples} samples")
+```
+
+---
+
 ## CLI
 
 ```bash
@@ -434,6 +489,12 @@ tqai compare "Explain gravity" --model mlx-community/Qwen2.5-7B-Instruct-8bit
 
 # Pre-convert a model for faster startup
 tqai convert --model mlx-community/Qwen2.5-7B-Instruct-8bit --output ./qwen7b-tqai/
+
+# v0.4 — offline gradient-based Fisher Information calibration
+# Runs forward+backward passes on a small calibration set, saves per-layer
+# Fisher diagonals to JSON. Use with the `fisher_static` scorer at runtime.
+tqai calibrate --model Qwen/Qwen2.5-3B-Instruct --output qwen-3b-fisher.json
+tqai calibrate --model Qwen/Qwen2.5-3B-Instruct --output qwen-3b-fisher.json --num-samples 32
 
 # Baseline (no compression)
 tqai run "Explain gravity" --model mlx-community/Qwen2.5-7B-Instruct-8bit --no-tqai
@@ -500,11 +561,11 @@ src/tqai/
 │   ├── registry.py        # Name-based plugin registration
 │   ├── runner.py          # CompressionPipeline (scorer → strategy → quantizer → monitor)
 │   └── __init__.py        # build_pipeline()
-├── scorers/               # palm, snr, fisher, sheaf, bsa
+├── scorers/               # palm, snr, fisher, fisher_static, sheaf, bsa
 ├── strategies/            # tiered, delta, delta2, window, cfg_sharing
 ├── monitors/              # stability, lyapunov
 ├── adapters/              # llm, dit, wan
-├── optimization/          # GA policy search (genome + ga_policy)
+├── optimization/          # GA policy search (genome + ga_policy) + Fisher calibration
 └── dit/                   # CFG sharing patch + VAE memory optimization + MPS fixes
 
 benchmarks/

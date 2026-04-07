@@ -3,6 +3,7 @@
 from tqai.pipeline.registry import register_scorer
 from tqai.scorers.bsa import BSAScorer
 from tqai.scorers.fisher import FisherScorer
+from tqai.scorers.fisher_static import FisherStaticScorer
 from tqai.scorers.palm import PalmScorer
 from tqai.scorers.sheaf import SheafScorer
 from tqai.scorers.snr import SNRScorer
@@ -10,5 +11,6 @@ from tqai.scorers.snr import SNRScorer
 register_scorer("palm", PalmScorer)
 register_scorer("snr", SNRScorer)
 register_scorer("fisher", FisherScorer)
+register_scorer("fisher_static", FisherStaticScorer)
 register_scorer("sheaf", SheafScorer)
 register_scorer("bsa", BSAScorer)

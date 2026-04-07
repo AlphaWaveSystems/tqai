@@ -77,6 +77,7 @@ select = ["E", "F", "I", "W"]
 "tests/test_optimization.py" = ["F841"]  # GA result discarded by design
 "tests/test_paper_gaps.py" = ["F841"]    # roundtrip checks discard intermediates
 "tests/test_sprint4.py" = ["F841"]       # monitor observe() return ignored
+"tests/test_fisher_calibration.py" = ["E501", "F841"]  # stub fixtures + intentional return discards
 "scripts/*.py" = ["E501", "I001"]
 "benchmarks/*.py" = ["E402", "E501", "F841"]
 
