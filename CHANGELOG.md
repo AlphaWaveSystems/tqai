@@ -5,6 +5,183 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-04-06
+
+The v0.4 cycle turns tqai from a single-algorithm KV cache compressor
+into a **composable middleware framework** plus a **paper playground**
+for the recent KV / attention compression literature. The proven v0.3.1
+core (PolarQuantizer, Lloyd-Max codebooks, cache strategies — all with
+Δppl=0.00 across 6 models) is **frozen**; every new technique ships as
+a single plugin file under `scorers/`, `strategies/`, `monitors/`, or
+`adapters/` without touching core code. Default path (`pipeline=None`)
+is byte-identical to v0.3.1: zero overhead, all 293 pre-v0.4 tests pass
+unchanged.
+
+This release also corrects a major framing error in the v0.3.1 docs:
+**K4/V2 KV quantization does NOT save peak runtime memory on Apple
+Silicon today.** The 80% number is real for compressed-storage size
+(serialized cache, wire format, foundation for a future fused
+dequant-attention kernel), but the v0.3.1 incremental cache strategy
+holds a persistent dequantized buffer at full input precision in
+addition to the compressed indices, so peak memory is unchanged. The
+quality preservation (Δppl=0.00, byte-identical output) is unaffected.
+Full benchmark and explanation in `reports/kv_memory_finding.md`.
+
+### Added — Composable middleware pipeline (PR #2)
+
+- **`pipeline/`** — `Scorer` / `CompressionStrategy` / `Monitor` /
+  `ModelAdapter` protocols + name-based registry + `CompressionPipeline`
+  runner. The default path (`pipeline=None`) short-circuits to direct
+  `PolarQuantizer.quantize()` calls.
+- **`scorers/`** — 5 plugins:
+  - `palm` — TurboQuant EMA novelty scoring
+  - `snr` — Min-SNR diffusion schedule (cosine + linear)
+  - `fisher` — runtime squared-activation proxy (documented as broken; see `fisher_static` in PR #5)
+  - `sheaf` — discrete Laplacian harmonicity classifier (Sheaf Attention, AAAI 2026)
+  - `bsa` — block centroid saliency (BSA, arXiv:2509.01085, KV side)
+- **`strategies/`** — 5 plugins:
+  - `tiered` — dual-quantizer routing by score (now actually uses `quantizer_low`, fixed in PR #2)
+  - `delta` — first-order inter-step Δ (DiTFastAttn step sharing)
+  - `delta2` — second-order Δ² with order-2 → 1 → full automatic fallback (QuantSparse, arXiv:2509.23681)
+  - `window` — similarity-based attention output cache (DiTFastAttn WA-RS)
+  - `cfg_sharing` — split-pass (WAN) and batched (LTX-2) CFG sharing modes (DiTFastAttn)
+- **`monitors/`** — `stability` (entropy-shift detection) + `lyapunov` (FTLE divergence)
+- **`adapters/`** — `llm` / `dit` / `wan` model family adapters
+- **`optimization/`** — GA policy search (`PolicyGenome` + `GASearch`) over the discrete pipeline configuration space
+- **`dit/`** — production diffusers integration:
+  - `optimize_vae_memory(pipe)` — enables VAE tiling/slicing, prevents the 100 GB+ peak that otherwise OOMs WAN 2.2 5B at 81-frame video on a 128 GB Mac
+  - `patch_mps_compatibility(pipe)` — fixes the LTX-2 RoPE float64 crash on Apple MPS
+  - `patch_cfg_sharing(pipe)` — installs CFG sharing hooks
+- **Chunked attention** — `attention.py` chunked SDPA via online softmax. **Documented as honest negative result on MLX** — fused `mx.fast.scaled_dot_product_attention` is 3-5× faster at 16K-32K context. Ships for CUDA users without FlashAttention.
+- **MLX forward hooks** — `MLXForwardCompressionHooks` via module replacement (MLX has no `register_forward_pre_hook`). Parity with PyTorch path on Apple Silicon.
+- **Per-head-type codebook registry** — `codebook/registry.py` accepts a `head_type` discriminator (copresheaf-inspired). No specialized codebooks shipped yet but the slot is in place.
+- **Skip-layers config** — `pipeline.skip_layers` lets users protect specific attention layers from any pipeline middleware (per arXiv:2504.10317 finding that some layers must not be compressed).
+- **CFG sharing strategy** — `strategies/cfg_sharing.py` for diffusers video pipelines.
+- **Research paper update** — `paper/tqai_paper.md` and `.tex` rewritten to reflect v0.4: composable pipeline section, paper playground section, production diffusers integration, three principled negative results, references reorganized into 7 categories.
+
+### Added — Few-step video presets (PR #3)
+
+- **`tqai.dit.get_video_preset(pipe, mode)`** — returns a verified
+  `VideoPreset(num_inference_steps, guidance_scale)` for `WanPipeline`
+  and `LTX2Pipeline`. Four modes per pipeline:
+  - `quality`: model card default (25 steps for WAN, 30 for LTX-2)
+  - `balanced`: half the baseline steps
+  - `fast`: quarter (8 steps)
+  - `draft`: minimum viable (4 steps)
+- **`benchmarks/benchmark_video_steps.py`** — sweeps all 4 presets and
+  measures PSNR vs the quality reference.
+- **Empirical result on WAN 2.2 5B (33 frames, 480x832):** at 4 denoising
+  steps the output has PSNR 73.1 dB vs the 25-step reference — well above
+  the 40 dB near-lossless threshold. **Modern flow-matching video models
+  do not need distillation to handle few-step inference**; their
+  underlying ODE solvers degrade gracefully on their own. 1.66× wall-clock
+  speedup, perceptually identical output.
+
+### Added — KV memory benchmark + honest correction (PR #4)
+
+- **`benchmarks/benchmark_kv_memory.py`** — subprocess-isolated benchmark
+  that uses MLX-native memory APIs (`mx.get_active_memory()` /
+  `mx.get_peak_memory()` / `mx.reset_peak_memory()`) instead of
+  `resource.getrusage().ru_maxrss` (which is the lifetime maximum and
+  doesn't reset between configurations). Each (context, config) pair
+  runs in its own Python subprocess so MLX memory state is fresh.
+- **`reports/kv_memory_finding.md`** — full writeup of the finding,
+  cross-validated with two independent measurement methodologies.
+- **Documentation corrections**: README, paper (md + tex), and
+  `where_tqai_shines.md` all updated to reframe the "80% memory savings"
+  claim as "80% reduction in compressed-storage KV cache size", with an
+  explicit note that runtime peak memory is unchanged on Apple Silicon
+  and a pointer to the writeup.
+
+### Added — Offline Fisher Information calibration (PR #5)
+
+- **`tqai.optimization.calibrate_fisher()`** — runs forward+backward
+  passes on a small calibration set (8-32 prompts), accumulates squared
+  gradients per attention layer's K and V projection weights, averages
+  across samples, and saves a `FisherCalibration` JSON. The actual
+  Fisher Information diagonal, not the runtime activation proxy.
+- **`tqai.scorers.fisher_static.FisherStaticScorer`** — loads the
+  calibration JSON at construction, normalizes the chosen Fisher
+  values to `[0, 1]`, serves them via constant-time lookup at scoring
+  time. Four `kv_mode` options (`k`, `v`, `max`, `mean`). Registered
+  as `"fisher_static"` in the scorer registry.
+- **`tqai calibrate` CLI** — `tqai calibrate --model X --output X-fisher.json`
+  with 16 built-in default prompts and `--prompts-file` for custom sets.
+- **End-to-end validated** on real Qwen 2.5-0.5B-Instruct: 24 layers,
+  4 samples, 0.5 second wall-clock, 32× ratio between most and least
+  important layer's K Fisher.
+
+### Added — Reports
+
+- `reports/where_tqai_shines.md` — honest assessment of where v0.4
+  delivers and where it doesn't on Apple Silicon
+- `reports/paper_coverage_report.md` — per-paper implementation status
+- `reports/benchmark_report.html` — standalone HTML with charts
+- `reports/kv_memory_finding.md` — Step #4 KV memory writeup
+
+### Changed
+
+- `tqai.patch()` accepts `pipeline: dict | None`, `chunk_attention: bool`,
+  `attention_chunk_size: int`, `kv_compression: bool` parameters
+- `TurboQuantConfig` adds `pipeline`, `chunk_attention`,
+  `attention_chunk_size`, `kv_compression` fields
+- `cache/hf.py` and `cache/mlx.py` add a pipeline dispatch path in the
+  incremental and residual strategies (zero overhead when `pipeline=None`)
+- `cli.py` adds `tqai plugins`, `tqai calibrate`, and `--scorer` /
+  `--strategy` flags on `tqai run`
+- `module_utils.py` extended for DiT module detection (BasicTransformerBlock)
+- `hooks.py` adds device-handling fix for the rotation matrix on MPS
+- `attention.py` chunked SDPA: fixed decode-mode causal mask bug (was
+  using T_q-relative positions; now correctly accounts for `T_kv - T_q`
+  offset so a single decode query at position `T_kv-1` attends to all
+  KV positions). Plus a regression test.
+- `attention.py` `patch_chunked_attention()` now walks `sys.modules` and
+  patches every loaded `mlx_lm.models.*` module that has a local
+  binding to `scaled_dot_product_attention`. Without this the wrapper
+  was never called by Qwen / Llama / etc.
+- README headline reframed from "80%+ memory savings" to "byte-identical
+  output to baseline" with an honest framing callout
+- Test suite expanded from 293 to **484 tests**
+
+### Honest negative results (documented, not bugs)
+
+- **Chunked attention via Python loops** loses to MLX's fused
+  `mx.fast.scaled_dot_product_attention` by 3-5× at 16K-32K context.
+  Output is bit-identical (15 tests prove it including a decode-mode
+  regression test). Ships for CUDA users without FlashAttention.
+  **Don't enable on MLX.**
+- **DiTFastAttn CFG sharing on MLX** is functionally correct (50% /
+  100% share rates) and produces near-lossless output (PSNR 56.5 dB)
+  but does not deliver wall-clock speedup because the per-attention
+  Python dispatch overhead approximately cancels the saved attention
+  compute on Apple Silicon's already-fast fused attention kernel.
+- **K4/V2 KV quantization does not save peak runtime memory on Apple
+  Silicon today.** Within ±0.2 GB of baseline at 4K-128K context.
+  The runtime memory unlock requires a fused dequant-attention Metal
+  kernel (KVQuant approach), which is on the v0.5 roadmap.
+- **Runtime `fisher` scorer (squared-activation proxy)** over-allocates
+  bits (NMSE 12× worse than baseline). Use the new offline
+  `fisher_static` scorer + `tqai calibrate` workflow instead.
+
+### Roadmap (v0.5 and beyond)
+
+1. **Fused dequant-attention Metal kernel** — the actual unlock for
+   runtime memory savings on Apple Silicon. ~1-2 weeks of Metal shader
+   work. v0.5 target.
+2. **Real-model benchmark of `fisher_static` vs `palm+delta`** — does
+   the gradient-based per-layer importance signal actually beat Palm's
+   runtime EMA novelty signal in practice?
+3. **Pre-shipped calibration JSONs** for popular models (Qwen, Gemma,
+   Llama) so users don't have to run `tqai calibrate` themselves.
+4. **Preset system for LLM patching** needs redesign now that we know
+   K4/V2 doesn't save runtime memory.
+5. **`mx.compile` the CFG sharing hooks** — would either close the
+   speedup gap or deliver a definitive verdict on whether a custom
+   Metal kernel is required.
+6. **On-device quantization for arbitrary head dimensions** — extend
+   Metal kernels to non-power-of-2 head_dim (e.g., D=896 for Qwen
+   hidden states, D=3072 for WAN 2.2 inner_dim).
+
 ## [0.3.1] - 2026-04-05
 
 ### Added
