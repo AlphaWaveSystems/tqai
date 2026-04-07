@@ -8,14 +8,29 @@
 TurboQuant KV cache compression for local LLM inference + a composable
 pipeline for experimenting with the latest compression papers locally.
 
-Compresses the KV cache to ~3 bits per channel with **80%+ memory savings**
-and zero perplexity change on 8B+ models. Supports both PyTorch (CPU/CUDA)
-and MLX (Apple Silicon). v0.4 adds a plugin-based pipeline so any paper —
-QuantSparse, DiTFastAttn, BSA, Sheaf, Fisher — can be added as a single
-file without touching core code, plus drop-in support for diffusers video
-pipelines (WAN 2.2, LTX-2).
+Compresses the KV cache to ~3 bits per channel with **byte-identical
+output to baseline** on 8B+ models (Δppl = 0.00 across Qwen, Gemma,
+Llama). Supports both PyTorch (CPU/CUDA) and MLX (Apple Silicon). v0.4
+adds a plugin-based pipeline so any paper — QuantSparse, DiTFastAttn,
+BSA, Sheaf, Fisher — can be added as a single file without touching
+core code, plus drop-in support for diffusers video pipelines
+(WAN 2.2, LTX-2).
 
 Based on [TurboQuant](https://arxiv.org/abs/2504.19874) (Google Research, ICLR 2026).
+
+> **Honest framing on the 80% number.** The K4/V2 quantization produces
+> a compressed-storage form that is ~5× smaller than the uncompressed
+> bf16 KV tensors. This reduction is real for **wire format / serialized
+> KV / future fused dequant-attention kernels**, but **does not reduce
+> peak runtime memory on Apple Silicon today** because the v0.3.1
+> incremental cache strategy keeps a persistent dequantized buffer at
+> full input precision (the design choice that enables O(1) per-token
+> decode). Measured peak memory on Qwen 2.5-7B Q8 at 4K–128K context:
+> tqai is within ±0.2 GB of baseline at every length. Full benchmark
+> and explanation in [`reports/kv_memory_finding.md`](reports/kv_memory_finding.md).
+> The actual unlock for runtime memory savings is a fused dequant-attention
+> Metal kernel ([KVQuant](https://arxiv.org/abs/2401.18079) approach),
+> which is on the v0.5 roadmap.
 
 ---
 
@@ -150,17 +165,22 @@ Delta strategies cut reconstruction distortion in half on synthetic streaming da
 
 ### KV Cache
 
-| Config | Avg Bits | Memory Saved | Recommended For |
-|--------|----------|--------------|-----------------|
-| `bits_k=4, bits_v=2` | 3.0 | **80%** | Production — best quality/compression balance |
-| `bits_k=3, bits_v=2` | 2.5 | **84%** | Extended context windows |
+The "compressed-storage saved" column is the size reduction of the
+serialized KV cache form (compressed indices vs bf16 tensors). It is
+**not** a peak runtime memory reduction — see the honest framing
+note at the top of this README and [`reports/kv_memory_finding.md`](reports/kv_memory_finding.md).
+
+| Config | Avg Bits | Compressed-Storage Saved | Recommended For |
+|--------|----------|--------------------------|-----------------|
+| `bits_k=4, bits_v=2` | 3.0 | **80%** | Production — best quality/storage balance, byte-identical output |
+| `bits_k=3, bits_v=2` | 2.5 | **84%** | Smallest serialized cache, still byte-identical on tested models |
 | `bits_k=4, bits_v=3` | 3.5 | **78%** | Quality-sensitive applications |
 
 ### Named Configs (CLI)
 
 | Config | KV | Hidden | FFN | Use Case |
 |--------|----|--------|-----|----------|
-| `kv-only` | K4/V2 | — | — | KV memory savings only |
+| `kv-only` | K4/V2 | — | — | KV cache compression (storage form, quality-preserving) |
 | `kv+hidden8` | K4/V2 | 8-bit | — | KV + hidden state compression |
 | `kv+hidden6` | K4/V2 | 6-bit | — | More aggressive hidden compression |
 | `kv+ffn8` | K4/V2 | — | 8-bit | KV + FFN activation compression |
