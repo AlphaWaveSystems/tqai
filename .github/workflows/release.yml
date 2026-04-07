@@ -58,12 +58,45 @@ jobs:
           name: dist
           path: dist/
 
-      - name: Create GitHub Release
+      # Note: github.ref_name is set by the workflow trigger (push of a
+      # v* tag) and is not user-controlled input — it comes from a tag
+      # the repo owner pushed. We still pass it via env: rather than
+      # direct interpolation to follow the safe pattern.
+      - name: Extract changelog section for this version
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          # Strip leading 'v' from the tag (v0.4.0 -> 0.4.0) to match
+          # the CHANGELOG.md "## [0.4.0]" headings.
+          VERSION="${TAG_NAME#v}"
+          awk -v v="[$VERSION]" '
+            index($0, "## " v) == 1 { flag = 1; next }
+            /^## \[/ { flag = 0 }
+            flag
+          ' CHANGELOG.md > release-notes.md
+
+          # Fallback if no matching section was found (shouldn't happen
+          # for a real release, but never fail the workflow on this).
+          if [ ! -s release-notes.md ]; then
+            printf 'Release %s\n\n(No matching CHANGELOG.md section for %s; see git log for details.)\n' "$TAG_NAME" "$VERSION" > release-notes.md
+          fi
+
+          echo "--- release-notes.md (first 20 lines) ---"
+          head -20 release-notes.md
+          echo "--- $(wc -l < release-notes.md) lines total ---"
+
+      - name: Create or update GitHub Release (idempotent)
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ github.ref_name }}
         run: |
-          gh release create "$TAG_NAME" dist/* \
-            --title "$TAG_NAME" \
-            --notes-file CHANGELOG.md
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            echo "Release $TAG_NAME already exists, uploading artifacts with --clobber"
+            gh release upload "$TAG_NAME" dist/* --clobber
+          else
+            echo "Creating new release $TAG_NAME"
+            gh release create "$TAG_NAME" dist/* \
+              --title "$TAG_NAME" \
+              --notes-file release-notes.md
+          fi
 
