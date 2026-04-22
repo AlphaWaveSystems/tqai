@@ -80,6 +80,17 @@ class TurboQuantMLXCache:
         self._recent_keys: Any | None = None  # [1, H, <=R, D] full precision
         self._recent_values: Any | None = None
 
+        # Compressed KV buffer (strategy: compressed)
+        # Stores indices + norms in GPU memory; never materialises float32 history.
+        # Shape: [1, n_kv_heads, T_stored, head_dim] uint8 / [1, n_kv_heads, T_stored, 1] fp16
+        self._k_indices: Any | None = None
+        self._k_norms: Any | None = None
+        self._v_indices: Any | None = None
+        self._v_norms: Any | None = None
+        # When True (set by patch_fused_attention), update_and_fetch skips assembling
+        # a float32 K/V buffer — the patched SDPA calls compute_fused_attention instead.
+        self._skip_assemble: bool = False
+
         self.offset: int = 0
         self._input_dtype = None
 
@@ -139,10 +150,23 @@ class TurboQuantMLXCache:
                 self._update_residual(keys, values, mx)
             elif self._strategy == "incremental":
                 self._update_incremental(keys, values, mx)
+            elif self._strategy == "compressed":
+                self._update_compressed(keys, values, mx)
             else:
                 self._update_full(keys, values)
 
         self.offset += new_seq
+
+        # For the compressed + fused path: the patched SDPA calls
+        # compute_fused_attention directly, so we skip assembling float32 K/V.
+        # During prefill (new_seq > 1) or without the patch, fall through to
+        # the normal assembly path so the model gets valid float32 tensors.
+        if self._strategy == "compressed" and self._skip_assemble and new_seq == 1:
+            # Return zero-shaped placeholder — patched SDPA ignores it.
+            dummy = mx.zeros((1, self.n_kv_heads, self.offset, self.head_dim))
+            self.keys = dummy
+            self.values = dummy
+            return dummy, dummy
 
         # Assemble full history
         all_keys = self._assemble(is_key=True, mx=mx)
@@ -259,6 +283,9 @@ class TurboQuantMLXCache:
         if self._strategy == "full":
             return self._reconstruct_full(is_key, mx)
 
+        if self._strategy == "compressed":
+            return self._reconstruct_compressed(is_key, mx)
+
         buffer = self._k_buffer if is_key else self._v_buffer
         recent = None
         if self._strategy == "residual":
@@ -279,6 +306,182 @@ class TurboQuantMLXCache:
         if self._input_dtype is not None and result.dtype != self._input_dtype:
             result = result.astype(self._input_dtype)
         return result
+
+    # ------------------------------------------------------------------
+    # Strategy: compressed — keeps indices+norms in GPU memory
+    # ------------------------------------------------------------------
+
+    def _update_compressed(self, keys, values, mx):
+        """Quantize new tokens, append to compressed (uint8+fp16) buffer.
+
+        Never stores a float32 history buffer.  The full K/V history is
+        reconstructed on demand by ``_reconstruct_compressed`` (fallback)
+        or consumed directly by ``compute_fused_attention`` (fast path).
+        """
+        k_idx, k_nrm = self._k_quantizer.quantize(keys)   # uint8, fp16
+        v_idx, v_nrm = self._v_quantizer.quantize(values)
+
+        if self._k_indices is None:
+            self._k_indices = k_idx
+            self._k_norms   = k_nrm
+            self._v_indices = v_idx
+            self._v_norms   = v_nrm
+        else:
+            self._k_indices = mx.concatenate([self._k_indices, k_idx], axis=2)
+            self._k_norms   = mx.concatenate([self._k_norms,   k_nrm], axis=2)
+            self._v_indices = mx.concatenate([self._v_indices, v_idx], axis=2)
+            self._v_norms   = mx.concatenate([self._v_norms,   v_nrm], axis=2)
+
+    def _reconstruct_compressed(self, is_key: bool, mx):
+        """Fallback: dequantize the full compressed buffer → float32.
+
+        Used when ``compute_fused_attention`` is not active (e.g. the SDPA
+        patch is not installed, or during prefill with T_q > 1).
+        """
+        sink = self._sink_keys if is_key else self._sink_values
+        indices = self._k_indices if is_key else self._v_indices
+        norms   = self._k_norms   if is_key else self._v_norms
+        quantizer = self._k_quantizer if is_key else self._v_quantizer
+
+        parts = []
+        if sink is not None:
+            parts.append(sink)
+        if indices is not None:
+            dequant = quantizer.dequantize(indices, norms)
+            parts.append(dequant)
+
+        if not parts:
+            return mx.zeros((1, self.n_kv_heads, 0, self.head_dim))
+
+        result = mx.concatenate(parts, axis=2) if len(parts) > 1 else parts[0]
+        if self._input_dtype is not None and result.dtype != self._input_dtype:
+            result = result.astype(self._input_dtype)
+        return result
+
+    def compute_fused_attention(
+        self,
+        queries: Any,
+        scale: float,
+        causal: bool = True,
+    ) -> Any:
+        """Run fused dequant-attention over the compressed KV cache.
+
+        Computes multi-head attention without materialising float32 K or V
+        buffers.  Handles GQA, sink tokens (full-precision chunks), and
+        compressed tokens (fused Metal kernels) via online softmax.
+
+        Only valid when ``_strategy == "compressed"`` and Metal is available.
+        Called by the patched SDPA in ``patch_fused_attention`` during decode.
+
+        Args:
+            queries: ``[B, n_q_heads, T_q, D]`` query tensor.
+            scale: Attention scale (typically ``1/sqrt(D)``).
+            causal: Apply causal mask when T_q > 1 (prefill).
+
+        Returns:
+            Attention output ``[B, n_q_heads, T_q, D]`` float32.
+        """
+        import mlx.core as mx
+        from tqai.kernels import metal_aggregate_values, metal_score_keys
+
+        B, n_q_heads, T_q, D = queries.shape
+        n_kv_heads = self.n_kv_heads
+        repeats = n_q_heads // n_kv_heads
+
+        R_k = self._k_quantizer._rotation          # [D, D] float32
+        R_v = self._v_quantizer._rotation
+        centroids_k = self._k_quantizer._centroids  # [n_levels] float32
+        centroids_v = self._v_quantizer._centroids
+
+        outputs = []
+        for b in range(B):
+            for h_q in range(n_q_heads):
+                h_kv = h_q // repeats
+                for t in range(T_q):
+                    q_vec = queries[b, h_q, t, :].astype(mx.float32)  # (D,)
+
+                    # --- Scoring ---
+                    parts_k = []
+                    parts_v_float = []  # float32 V slices from sinks
+                    v_comp_idx = None
+                    v_comp_nrm = None
+
+                    # Sink tokens: full-precision dot products
+                    if self._sink_keys is not None:
+                        k_sink = self._sink_keys[b, h_kv, :, :]    # (T_s, D)
+                        v_sink = self._sink_values[b, h_kv, :, :]
+                        T_s = k_sink.shape[0]
+
+                        if causal and T_q > 1:
+                            kv_end = self._sink_keys.shape[2] - T_q + t + 1
+                            k_sink = k_sink[:kv_end]
+                            v_sink = v_sink[:kv_end]
+                            T_s = k_sink.shape[0]
+
+                        if T_s > 0:
+                            scores_s = (k_sink.astype(mx.float32) @ q_vec) * scale
+                            parts_k.append(scores_s)
+                            parts_v_float.append(v_sink.astype(mx.float32))
+
+                    # Compressed tokens: fused Metal gather-dot
+                    if self._k_indices is not None:
+                        k_idx = self._k_indices[b, h_kv, :, :]   # (T_c, D)
+                        k_nrm = mx.reshape(
+                            self._k_norms[b, h_kv, :, :], (-1,)
+                        )                                           # (T_c,)
+                        T_c = k_idx.shape[0]
+
+                        if causal and T_q > 1:
+                            T_sink_total = (
+                                self._sink_keys.shape[2] if self._sink_keys is not None else 0
+                            )
+                            kv_end = self.offset - T_q + t + 1 - T_sink_total
+                            k_idx = k_idx[:kv_end]
+                            k_nrm = k_nrm[:kv_end]
+                            T_c = k_idx.shape[0]
+
+                        if T_c > 0:
+                            q_rotated = R_k @ q_vec  # (D,)
+                            scores_c = metal_score_keys(
+                                q_rotated, k_idx, k_nrm, centroids_k
+                            ) * scale
+                            parts_k.append(scores_c)
+                            v_comp_idx = self._v_indices[b, h_kv, :T_c, :]
+                            v_comp_nrm = mx.reshape(
+                                self._v_norms[b, h_kv, :T_c, :], (-1,)
+                            )
+
+                    if not parts_k:
+                        outputs.append(mx.zeros((D,), dtype=mx.float32))
+                        continue
+
+                    all_scores = mx.concatenate(parts_k) if len(parts_k) > 1 else parts_k[0]
+                    weights = mx.softmax(all_scores, axis=-1)
+
+                    # --- Value aggregation ---
+                    output = mx.zeros((D,), dtype=mx.float32)
+                    idx = 0
+
+                    # Sink value weighted sum (full-precision)
+                    for v_f in parts_v_float:
+                        T_chunk = v_f.shape[0]
+                        w_chunk = weights[idx: idx + T_chunk]
+                        output = output + (w_chunk[:, None] * v_f).sum(axis=0)
+                        idx += T_chunk
+
+                    # Compressed value weighted sum (fused Metal kernel)
+                    if v_comp_idx is not None:
+                        T_c = v_comp_idx.shape[0]
+                        w_comp = weights[idx: idx + T_c]
+                        out_rotated = metal_aggregate_values(
+                            w_comp, v_comp_idx, v_comp_nrm, centroids_v
+                        )
+                        output = output + R_v.T @ out_rotated
+
+                    outputs.append(output)
+
+        stacked = mx.stack(outputs, axis=0)           # (B*n_q*T_q, D)
+        return stacked.reshape(B, n_q_heads, T_q, D)
 
     def _reconstruct_full(self, is_key: bool, mx):
         """Legacy full reconstruction — dequantizes entire history."""

@@ -201,3 +201,94 @@ def unpatch_chunked_attention(model) -> None:
     del model._tqai_original_sdpa
     if hasattr(model, "_tqai_patched_modules"):
         del model._tqai_patched_modules
+
+
+# ---------------------------------------------------------------------------
+# Fused dequant-attention patch for compressed KV cache strategy
+# ---------------------------------------------------------------------------
+
+
+def patch_fused_attention(model, cache_list: list) -> None:
+    """Patch SDPA to use fused dequant-attention for compressed KV caches.
+
+    When ``TurboQuantMLXCache`` is in ``compressed`` strategy mode, the
+    standard SDPA would receive float32 K/V reconstructed by dequantizing
+    the entire cache on every step.  This patch short-circuits that:
+
+    - During **decode** (T_q == 1): calls ``cache.compute_fused_attention``
+      directly — no float32 K/V buffer is ever materialised.
+    - During **prefill** (T_q > 1): falls through to the original SDPA
+      (which uses ``_reconstruct_compressed`` to build float32 K/V once).
+
+    Also sets ``cache._skip_assemble = True`` on every cache in
+    ``cache_list`` so that ``update_and_fetch`` skips assembling dummy
+    float32 tensors during decode steps.
+
+    Args:
+        model: The mlx-lm model (stores restore reference).
+        cache_list: List of ``TurboQuantMLXCache`` objects to activate.
+    """
+    import sys
+
+    from tqai.cache.mlx import TurboQuantMLXCache
+
+    # Activate skip-assemble on all compressed caches
+    for cache in cache_list:
+        if isinstance(cache, TurboQuantMLXCache) and cache._strategy == "compressed":
+            cache._skip_assemble = True
+
+    import mlx_lm.models.base as base_module
+
+    original_sdpa = base_module.scaled_dot_product_attention
+
+    def fused_sdpa_wrapper(queries, keys, values, cache, scale, mask, sinks=None):
+        if (
+            isinstance(cache, TurboQuantMLXCache)
+            and cache._strategy == "compressed"
+            and cache._skip_assemble
+            and queries.shape[2] == 1  # decode mode: single new query token
+            and not cache.is_empty     # cache has history to attend over
+        ):
+            return cache.compute_fused_attention(queries, scale, causal=True)
+        return original_sdpa(
+            queries, keys, values, cache=cache, scale=scale, mask=mask, sinks=sinks
+        )
+
+    base_module.scaled_dot_product_attention = fused_sdpa_wrapper
+
+    patched_modules: list[str] = []
+    for module_name, module in list(sys.modules.items()):
+        if not module_name.startswith("mlx_lm.models.") or module is None:
+            continue
+        if module_name == "mlx_lm.models.base":
+            continue
+        existing = getattr(module, "scaled_dot_product_attention", None)
+        if existing is original_sdpa:
+            module.scaled_dot_product_attention = fused_sdpa_wrapper
+            patched_modules.append(module_name)
+
+    model._tqai_fused_original_sdpa = original_sdpa
+    model._tqai_fused_patched_modules = patched_modules
+
+
+def unpatch_fused_attention(model) -> None:
+    """Restore SDPA patched by ``patch_fused_attention``."""
+    import sys
+
+    if not hasattr(model, "_tqai_fused_original_sdpa"):
+        return
+
+    original_sdpa = model._tqai_fused_original_sdpa
+    patched_modules = getattr(model, "_tqai_fused_patched_modules", [])
+
+    import mlx_lm.models.base as base_module
+    base_module.scaled_dot_product_attention = original_sdpa
+
+    for module_name in patched_modules:
+        module = sys.modules.get(module_name)
+        if module is not None:
+            module.scaled_dot_product_attention = original_sdpa
+
+    del model._tqai_fused_original_sdpa
+    if hasattr(model, "_tqai_fused_patched_modules"):
+        del model._tqai_fused_patched_modules
