@@ -44,7 +44,7 @@ class TurboQuantConfig:
     # touching the KV cache.
     kv_compression: bool = True
 
-    _VALID_STRATEGIES = {"auto", "incremental", "residual", "full"}
+    _VALID_STRATEGIES = {"auto", "incremental", "residual", "full", "compressed"}
 
     def __post_init__(self):
         if self.cache_strategy not in self._VALID_STRATEGIES:
