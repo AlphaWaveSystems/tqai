@@ -14,6 +14,16 @@ def _patch(model, config: TurboQuantConfig):
 
             patch_mlx(model, config)
 
+            # Compressed strategy: patch SDPA to route decode steps through
+            # fused Metal kernels instead of materializing float32 K/V.
+            resolved = config.cache_strategy
+            if resolved == "auto":
+                resolved = "incremental"
+            if resolved == "compressed":
+                from tqai.attention import patch_fused_attention
+
+                patch_fused_attention(model, [])
+
         # Forward-pass activation compression (MLX)
         if config.has_forward_compression:
             from tqai.hooks import ForwardHookConfig, MLXForwardCompressionHooks
@@ -70,6 +80,12 @@ def _unpatch(model):
     if hasattr(model, "_tqai_hooks"):
         model._tqai_hooks.detach()
         del model._tqai_hooks
+
+    # Remove fused attention patch (compressed strategy)
+    if hasattr(model, "_tqai_fused_original_sdpa"):
+        from tqai.attention import unpatch_fused_attention
+
+        unpatch_fused_attention(model)
 
     # Remove chunked attention patch
     if hasattr(model, "_tqai_original_sdpa"):

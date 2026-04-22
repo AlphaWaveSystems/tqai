@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-__version__ = "0.4.0"
+__version__ = "0.6.0"
 
 from tqai.config import TurboQuantConfig
 
 
 def patch(
     model,
-    bits_k: int = 4,
-    bits_v: int = 2,
+    bits_k: int = 8,
+    bits_v: int = 8,
     sink_tokens: int = 0,
     backend: str | None = None,
     device: str | None = None,
@@ -45,8 +45,12 @@ def patch(
 
     Args:
         model: HuggingFace model or mlx-lm model.
-        bits_k: Bits per key coordinate (default 4).
-        bits_v: Bits per value coordinate (default 2).
+        bits_k: Bits per key coordinate (default 8). At 8-bit the
+            quantization is near-lossless (PPL +0.0%) while still
+            achieving 2x KV cache capacity via norm-direction
+            decomposition. Lower values (4, 6) trade quality for
+            serialization size when bit-packing is used.
+        bits_v: Bits per value coordinate (default 8).
         sink_tokens: Number of initial tokens to keep uncompressed.
         backend: ``'torch'``, ``'mlx'``, or ``None`` (auto-detect).
         device: PyTorch device string (ignored for MLX).
@@ -68,6 +72,9 @@ def patch(
             selects ``'incremental'`` which maintains a running dequantized
             buffer for O(1) per-token cost. ``'residual'`` keeps the last
             ``residual_window`` tokens uncompressed for better quality.
+            ``'compressed'`` keeps uint8 indices + fp16 norms in GPU memory
+            and uses fused Metal kernels for attention — ~2× context capacity
+            at 4-bit with CosSim 0.995 (requires Apple Silicon with Metal).
             ``'full'`` uses the original O(n) full-reconstruction path.
         residual_window: Number of recent tokens to keep uncompressed when
             using the ``'residual'`` cache strategy (default 128).

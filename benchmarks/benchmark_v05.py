@@ -260,93 +260,397 @@ def bench_fused_attention(results: dict) -> None:
 # Section 3: Cache decode latency
 # ---------------------------------------------------------------------------
 
-def bench_cache_decode(results: dict) -> None:
-    _header("SECTION 3 — Cache Decode Latency  (v0.4 incremental vs v0.5 compressed-fused)")
-    print("  Fair comparison: v0.4 = update_and_fetch + SDPA.  v0.5 = update_compressed + compute_fused_attention.")
-    print("  Both measure the complete attention output for one new token.\n")
-
+def _bench_geometry(
+    label: str,
+    D: int,
+    n_kv: int,
+    n_q: int,
+    bits: int,
+    t_kvs: list[int],
+    results_out: dict,
+) -> None:
+    """Run v0.4 vs v0.6 decode latency for one model geometry."""
     from tqai.cache.mlx import TurboQuantMLXCache
     from tqai.config import TurboQuantConfig
 
-    D, H, B, bits = 128, 8, 1, 4
+    B = 1
     scale = D ** -0.5
-    t_kvs = [64, 256, 512, 1024, 2048, 4096]
+    repeats = n_q // n_kv
 
-    _row("T_kv", "v0.4 total ms", "v0.5 fused ms", "Speedup",
-         "v0.4 DRAM est", "v0.5 DRAM est",
-         widths=(8, 14, 14, 10, 16, 16))
+    _subheader(f"  {label}  (D={D}, n_kv={n_kv}, n_q={n_q}, repeats={repeats}, bits={bits})")
+    _row("T_kv", "v0.4 ms", "v0.6 ms", "Speedup",
+         "v0.4 DRAM", "v0.6 DRAM",
+         widths=(10, 10, 10, 10, 12, 12))
     print(SEP)
 
-    cd = results.setdefault("cache_decode", {})
+    geo_key = label.replace(" ", "_").lower()
+    geo = results_out.setdefault(geo_key, {
+        "D": D, "n_kv": n_kv, "n_q": n_q, "bits": bits, "points": {},
+    })
 
     for T in t_kvs:
-        # ── v0.4: incremental strategy + native SDPA ──────────────────────
+        # ── v0.4: incremental + SDPA ─────────────────────────────────────
         cfg_inc = TurboQuantConfig(
             bits_k=bits, bits_v=bits,
             cache_strategy="incremental", use_qjl=False,
         )
-        cache_inc = TurboQuantMLXCache(head_dim=D, n_kv_heads=H, config=cfg_inc)
-        kv_prefill = mx.random.normal((B, H, T, D), key=mx.random.key(10))
+        cache_inc = TurboQuantMLXCache(head_dim=D, n_kv_heads=n_kv, config=cfg_inc)
+        kv_prefill = mx.random.normal((B, n_kv, T, D), key=mx.random.key(10))
         cache_inc.update_and_fetch(kv_prefill, kv_prefill)
         mx.synchronize()
 
-        kv_new = mx.random.normal((B, H, 1, D), key=mx.random.key(11))
-        q_dec  = mx.random.normal((B, H, 1, D), key=mx.random.key(12))
+        kv_new = mx.random.normal((B, n_kv, 1, D), key=mx.random.key(11))
+        q_dec  = mx.random.normal((B, n_q, 1, D), key=mx.random.key(12))
 
         def _inc_step():
             k_hist, v_hist = cache_inc.update_and_fetch(kv_new, kv_new)
-            # Run native MLX SDPA — this is what the model does after update
+            # GQA repeat for SDPA
+            if repeats > 1:
+                k_exp = mx.repeat(k_hist, repeats, axis=1)
+                v_exp = mx.repeat(v_hist, repeats, axis=1)
+            else:
+                k_exp, v_exp = k_hist, v_hist
             return mx.fast.scaled_dot_product_attention(
-                q_dec, k_hist, v_hist, scale=scale
+                q_dec, k_exp, v_exp, scale=scale
             )
 
         inc_ms = _bench(_inc_step)
 
-        # ── v0.5: compressed-fused ────────────────────────────────────────
+        # ── v0.6: compressed + batched fused ─────────────────────────────
         cfg_cmp = TurboQuantConfig(
             bits_k=bits, bits_v=bits,
             cache_strategy="compressed", use_qjl=False,
         )
-        cache_cmp = TurboQuantMLXCache(head_dim=D, n_kv_heads=H, config=cfg_cmp)
-        cache_cmp._skip_assemble = True
+        cache_v6 = TurboQuantMLXCache(head_dim=D, n_kv_heads=n_kv, config=cfg_cmp)
+        cache_v6._skip_assemble = True
         for t in range(T):
-            cache_cmp.update_and_fetch(kv_prefill[:, :, t:t+1, :],
-                                       kv_prefill[:, :, t:t+1, :])
+            cache_v6.update_and_fetch(kv_prefill[:, :, t:t+1, :],
+                                      kv_prefill[:, :, t:t+1, :])
         mx.synchronize()
 
-        def _cmp_step():
-            cache_cmp.update_and_fetch(kv_new, kv_new)
-            return cache_cmp.compute_fused_attention(q_dec, scale=scale)
+        def _v6_step():
+            cache_v6.update_and_fetch(kv_new, kv_new)
+            return cache_v6.compute_fused_attention(q_dec, scale=scale)
 
-        cmp_ms = _bench(_cmp_step)
+        v6_ms = _bench(_v6_step)
 
-        speedup = inc_ms / cmp_ms
+        speedup = inc_ms / v6_ms
 
-        # DRAM read estimate: K+V, all heads, per decode attention pass
-        # v0.4: float32 K+V = T * H * D * 4 * 2 bytes
-        dram_inc = T * H * D * 4 * 2 / 1024      # KB
-        # v0.5: uint8 indices + fp16 norms, K+V
-        dram_cmp = (T * H * D * 1 + T * H * 2) * 2 / 1024  # KB
+        # DRAM estimates (per step, K+V, all heads)
+        # v0.4: float32 K+V after GQA expansion = T * n_q * D * 4 * 2
+        dram_inc_kb = T * n_q * D * 4 * 2 / 1024
+        # v0.6: uint8 indices + fp16 norms, K+V, at KV-head granularity
+        dram_v6_kb = (T * n_kv * D * 1 + T * n_kv * 2) * 2 / 1024
 
-        _row(T,
-             f"{inc_ms:.3f}", f"{cmp_ms:.3f}",
+        _row(f"{T:,}",
+             f"{inc_ms:.3f}", f"{v6_ms:.3f}",
              f"{speedup:.2f}x",
-             f"{dram_inc:.0f} KB", f"{dram_cmp:.0f} KB",
-             widths=(8, 14, 14, 10, 16, 16))
+             f"{dram_inc_kb:.0f} KB", f"{dram_v6_kb:.0f} KB",
+             widths=(10, 10, 10, 10, 12, 12))
 
-        cd[T] = {
-            "incremental_total_ms": inc_ms,
-            "compressed_fused_ms": cmp_ms,
+        geo["points"][T] = {
+            "v04_ms": inc_ms,
+            "v06_ms": v6_ms,
             "speedup": speedup,
-            "dram_inc_kb": dram_inc,
-            "dram_cmp_kb": dram_cmp,
+            "dram_v04_kb": dram_inc_kb,
+            "dram_v06_kb": dram_v6_kb,
         }
 
     print()
-    print("  v0.4 DRAM: float32 K+V read by SDPA each step.")
-    print("  v0.5 DRAM: uint8 indices + fp16 norms read by fused kernels.")
-    print("  Speedup < 1 at short T_kv: Python head loop overhead dominates")
-    print("  over Metal dispatch savings.  At long context, bandwidth wins.\n")
+
+
+def bench_cache_decode(results: dict) -> None:
+    _header("SECTION 3 — Cache Decode Latency  (v0.4 incremental+SDPA  vs  v0.6 batched fused)")
+    print("  v0.4: update_and_fetch + GQA-expand + mx.fast.scaled_dot_product_attention")
+    print("  v0.6: update_compressed + compute_fused_attention (2 batched Metal dispatches)")
+    print("  DRAM v0.4: float32 K+V after GQA expansion.  DRAM v0.6: uint8+fp16 at KV-head level.\n")
+
+    cd = results.setdefault("cache_decode", {})
+
+    # ── Geometry A: Synthetic small (previous benchmark baseline) ─────────
+    _bench_geometry(
+        "Synthetic 8-head",
+        D=128, n_kv=8, n_q=8, bits=4,
+        t_kvs=[256, 1024, 4096, 8192, 16384, 32768],
+        results_out=cd,
+    )
+
+    # ── Geometry B: Llama-3-8B / Qwen2-7B class ──────────────────────────
+    _bench_geometry(
+        "Llama-3-8B class",
+        D=128, n_kv=8, n_q=32, bits=4,
+        t_kvs=[256, 1024, 4096, 8192, 16384, 32768],
+        results_out=cd,
+    )
+
+    # ── Geometry C: Llama-3-70B / Qwen2-72B class (heavy GQA) ────────────
+    _bench_geometry(
+        "Llama-3-70B class",
+        D=128, n_kv=8, n_q=64, bits=4,
+        t_kvs=[256, 1024, 4096, 8192, 16384, 32768],
+        results_out=cd,
+    )
+
+    # ── Geometry D: Mistral-7B class at 2-bit (aggressive compression) ──
+    _bench_geometry(
+        "Mistral-7B 2-bit",
+        D=128, n_kv=8, n_q=32, bits=2,
+        t_kvs=[1024, 4096, 16384, 32768, 65536],
+        results_out=cd,
+    )
+
+    # ── Geometry E: Long context push (Llama-3-8B, up to 128K) ──────────
+    _bench_geometry(
+        "Llama-3-8B long ctx",
+        D=128, n_kv=8, n_q=32, bits=4,
+        t_kvs=[8192, 16384, 32768, 65536, 131072],
+        results_out=cd,
+    )
+
+    print("  Speedup > 1.0x = v0.6 is faster (bandwidth-bound regime).")
+    print("  Speedup < 1.0x = v0.4 is faster (dispatch-overhead regime).\n")
+
+
+# ---------------------------------------------------------------------------
+# Section 3b: Memory capacity advantage
+# ---------------------------------------------------------------------------
+
+# Reference model configs: (name, n_layers, D, n_kv, n_q, model_weight_gb)
+_MODEL_CONFIGS = [
+    ("Llama-3-8B",   32, 128,  8, 32, 16.0),
+    ("Qwen2-7B",     32, 128,  4, 28, 14.5),
+    ("Llama-3-70B",  80, 128,  8, 64, 40.0),   # 4-bit quantized weights
+    ("Mistral-7B",   32, 128,  8, 32, 14.5),
+]
+
+
+def bench_capacity(results: dict) -> None:
+    _header("SECTION 3b — Memory Capacity Advantage  (max context given fixed DRAM budget)")
+    print("  Shows: given a device memory budget after model weights, how many tokens")
+    print("  can each KV cache strategy store — and what quality does it achieve.\n")
+
+    from tqai.cache.mlx import TurboQuantMLXCache
+    from tqai.config import TurboQuantConfig
+
+    device_budgets_gb = [8, 16, 24, 36, 48, 64]  # total device RAM
+
+    cap = results.setdefault("capacity", {})
+
+    # ── Part A: Max context length per strategy ───────────────────────────
+
+    _subheader("  Part A — Maximum context length (tokens) by device memory")
+    print()
+
+    for model_name, n_layers, D, n_kv, n_q, weight_gb in _MODEL_CONFIGS:
+        # Per-token KV memory for one layer, K+V combined
+        # float16: 2 * n_kv * D * 2 bytes
+        bytes_per_tok_fp16 = 2 * n_kv * D * 2
+        # v0.6 compressed: 2 * n_kv * (D * 1 + 1 * 2) bytes  (uint8 idx + fp16 norm)
+        bytes_per_tok_v06  = 2 * n_kv * (D * 1 + 2)
+
+        # Total across all layers
+        bytes_per_tok_fp16_total = bytes_per_tok_fp16 * n_layers
+        bytes_per_tok_v06_total  = bytes_per_tok_v06 * n_layers
+
+        print(f"  {model_name}  ({n_layers}L, D={D}, n_kv={n_kv}, n_q={n_q}, "
+              f"weights≈{weight_gb:.0f} GB)")
+        print(f"  KV/token/layer: fp16={bytes_per_tok_fp16} B, "
+              f"v0.6={bytes_per_tok_v06} B  "
+              f"({bytes_per_tok_fp16 / bytes_per_tok_v06:.1f}x reduction)")
+
+        _row("Device RAM", "KV budget", "fp16 max ctx", "v0.6 max ctx",
+             "Multiplier",
+             widths=(12, 12, 14, 14, 12))
+        print(SEP)
+
+        model_cap = cap.setdefault(model_name.lower().replace("-", "_"), {
+            "n_layers": n_layers, "D": D, "n_kv": n_kv, "n_q": n_q,
+            "weight_gb": weight_gb, "points": {},
+        })
+
+        for dev_gb in device_budgets_gb:
+            kv_budget_gb = dev_gb - weight_gb
+            if kv_budget_gb <= 0:
+                _row(f"{dev_gb} GB", "—", "—", "—", "—",
+                     widths=(12, 12, 14, 14, 12))
+                continue
+
+            kv_budget_bytes = kv_budget_gb * (1024 ** 3)
+
+            max_ctx_fp16 = int(kv_budget_bytes / bytes_per_tok_fp16_total)
+            max_ctx_v06  = int(kv_budget_bytes / bytes_per_tok_v06_total)
+            mult = max_ctx_v06 / max_ctx_fp16 if max_ctx_fp16 > 0 else float("inf")
+
+            _row(f"{dev_gb} GB", f"{kv_budget_gb:.1f} GB",
+                 f"{max_ctx_fp16:,}", f"{max_ctx_v06:,}",
+                 f"{mult:.1f}x",
+                 widths=(12, 12, 14, 14, 12))
+
+            model_cap["points"][dev_gb] = {
+                "kv_budget_gb": kv_budget_gb,
+                "max_ctx_fp16": max_ctx_fp16,
+                "max_ctx_v06": max_ctx_v06,
+                "multiplier": mult,
+            }
+
+        print()
+
+    # ── Part B: Reconstruction quality at operating points ────────────────
+
+    _subheader("  Part B — Reconstruction quality at compressed operating points")
+    print("  Measures NMSE and CosSim of the full quantize→dequantize round-trip")
+    print("  using vectors drawn from N(0, I/D) — the distribution of normalized")
+    print("  attention head vectors.\n")
+
+    D = 128
+    bits_list = [2, 4]
+    N_vecs = 4096
+
+    _row("Bits", "NMSE", "CosSim", "Capacity vs fp16",
+         widths=(8, 14, 12, 18))
+    print(SEP)
+
+    q_res = cap.setdefault("quality", {})
+
+    for bits in bits_list:
+        pq = PolarQuantizer(head_dim=D, bits=bits, seed=42, ops=_OPS, use_qjl=False)
+
+        x = mx.random.normal((N_vecs, D), key=mx.random.key(777))
+        mx.synchronize()
+        idx, nrm = pq.quantize(x)
+        x_hat = pq.dequantize(idx, nrm)
+        mx.synchronize()
+
+        x_np = np.array(x).astype(np.float64)
+        x_hat_np = np.array(x_hat).astype(np.float64)
+
+        mse = float(np.mean((x_np - x_hat_np) ** 2))
+        var = float(np.mean(x_np ** 2))
+        nmse = mse / (var + 1e-12)
+
+        dots = np.sum(x_np * x_hat_np, axis=-1)
+        na = np.linalg.norm(x_np, axis=-1)
+        nb = np.linalg.norm(x_hat_np, axis=-1)
+        cos = float(np.mean(dots / (na * nb + 1e-10)))
+
+        # Capacity ratio: bytes_fp16 / bytes_compressed per token per dim
+        # fp16: 2 bytes.  compressed: 1 byte (uint8 idx) + 2/D bytes (fp16 norm amortized)
+        bytes_v06_per_dim = 1.0 + 2.0 / D
+        ratio = 2.0 / bytes_v06_per_dim
+
+        _row(f"{bits}-bit",
+             f"{nmse:.5f}", f"{cos:.5f}",
+             f"{ratio:.1f}x",
+             widths=(8, 14, 12, 18))
+
+        q_res[bits] = {"nmse": nmse, "cosine_sim": cos, "capacity_ratio": ratio}
+
+    print()
+
+    # ── Part C: Live decode latency at max-capacity context lengths ───────
+
+    _subheader("  Part C — Decode latency at capacity-limited context lengths")
+    print("  Simulates: 24 GB device, Llama-3-8B, 4-bit compression.")
+    print("  fp16 maxes out at a shorter context; v0.6 can reach further.\n")
+
+    dev_gb = 24
+    weight_gb = 16.0
+    n_layers, n_kv_c, n_q_c, D_c, bits_c = 32, 8, 32, 128, 4
+    kv_budget = (dev_gb - weight_gb) * (1024 ** 3)
+
+    bytes_per_tok_fp16_c = 2 * n_kv_c * D_c * 2 * n_layers
+    bytes_per_tok_v06_c  = 2 * n_kv_c * (D_c + 2) * n_layers
+
+    max_fp16 = int(kv_budget / bytes_per_tok_fp16_c)
+    max_v06  = int(kv_budget / bytes_per_tok_v06_c)
+
+    # Pick comparison points: fp16's max, an intermediate, and v0.6's max
+    compare_points = sorted(set([
+        min(max_fp16, 4096),
+        max_fp16,
+        min(max_v06, max_fp16 * 2),
+        max_v06,
+    ]))
+    # Clamp to reasonable benchmark sizes (don't allocate >2GB for single cache)
+    compare_points = [t for t in compare_points if t <= 131072 and t > 0]
+
+    scale_c = D_c ** -0.5
+    B = 1
+
+    _row("T_kv", "fp16 fit?", "v0.6 fit?",
+         "v0.4 ms", "v0.6 ms", "Speedup",
+         widths=(10, 10, 10, 10, 10, 10))
+    print(SEP)
+
+    live = cap.setdefault("live_decode", {
+        "device_gb": dev_gb, "model": "Llama-3-8B", "points": {},
+    })
+
+    for T in compare_points:
+        fp16_fits = "yes" if T <= max_fp16 else "NO"
+        v06_fits  = "yes" if T <= max_v06 else "NO"
+
+        # v0.4: incremental + SDPA
+        cfg_inc = TurboQuantConfig(
+            bits_k=bits_c, bits_v=bits_c,
+            cache_strategy="incremental", use_qjl=False,
+        )
+        cache_inc = TurboQuantMLXCache(head_dim=D_c, n_kv_heads=n_kv_c, config=cfg_inc)
+        kv_pf = mx.random.normal((B, n_kv_c, T, D_c), key=mx.random.key(50))
+        cache_inc.update_and_fetch(kv_pf, kv_pf)
+        mx.synchronize()
+
+        kv_new = mx.random.normal((B, n_kv_c, 1, D_c), key=mx.random.key(51))
+        q_dec  = mx.random.normal((B, n_q_c, 1, D_c), key=mx.random.key(52))
+        repeats_c = n_q_c // n_kv_c
+
+        def _inc():
+            k_h, v_h = cache_inc.update_and_fetch(kv_new, kv_new)
+            if repeats_c > 1:
+                k_h = mx.repeat(k_h, repeats_c, axis=1)
+                v_h = mx.repeat(v_h, repeats_c, axis=1)
+            return mx.fast.scaled_dot_product_attention(q_dec, k_h, v_h, scale=scale_c)
+
+        inc_ms = _bench(_inc)
+
+        # v0.6: compressed + batched fused
+        cfg_cmp = TurboQuantConfig(
+            bits_k=bits_c, bits_v=bits_c,
+            cache_strategy="compressed", use_qjl=False,
+        )
+        cache_v6 = TurboQuantMLXCache(head_dim=D_c, n_kv_heads=n_kv_c, config=cfg_cmp)
+        cache_v6._skip_assemble = True
+        for t in range(T):
+            cache_v6.update_and_fetch(kv_pf[:, :, t:t+1, :], kv_pf[:, :, t:t+1, :])
+        mx.synchronize()
+
+        def _v6():
+            cache_v6.update_and_fetch(kv_new, kv_new)
+            return cache_v6.compute_fused_attention(q_dec, scale=scale_c)
+
+        v6_ms = _bench(_v6)
+        speedup = inc_ms / v6_ms
+
+        _row(f"{T:,}", fp16_fits, v06_fits,
+             f"{inc_ms:.3f}", f"{v6_ms:.3f}", f"{speedup:.2f}x",
+             widths=(10, 10, 10, 10, 10, 10))
+
+        live["points"][T] = {
+            "fp16_fits": T <= max_fp16,
+            "v06_fits": T <= max_v06,
+            "v04_ms": inc_ms,
+            "v06_ms": v6_ms,
+            "speedup": speedup,
+        }
+
+    print()
+    print(f"  24 GB device, Llama-3-8B (weights≈16 GB):")
+    print(f"  fp16 KV cache max context:  {max_fp16:,} tokens")
+    print(f"  v0.6 KV cache max context:  {max_v06:,} tokens  "
+          f"({max_v06 / max_fp16:.1f}x longer)")
+    print(f"  At contexts beyond {max_fp16:,}, fp16 cannot run at all — v0.6 is the")
+    print(f"  only option.  The ~1.7x latency overhead is the cost of reaching those")
+    print(f"  context lengths on constrained hardware.\n")
 
 
 # ---------------------------------------------------------------------------
@@ -505,7 +809,7 @@ def main() -> None:
     parser.add_argument("--json", default=None,
                         help="Path to save JSON results (default: benchmarks/results/v05_benchmark.json)")
     parser.add_argument("--section", type=int, default=0,
-                        help="Run only section N (1-6); 0 = all (default)")
+                        help="Run only section N (1-7); 0 = all (default)")
     args = parser.parse_args()
 
     if not metal_available():
@@ -519,6 +823,7 @@ def main() -> None:
         1: bench_kernels,
         2: bench_fused_attention,
         3: bench_cache_decode,
+        7: bench_capacity,
         4: bench_memory,
         5: bench_packing,
         6: bench_quality,
