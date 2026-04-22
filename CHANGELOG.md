@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-04-21
+
+### Added — RotorQuantizer: Clifford rotor block-diagonal KV compression
+
+- **`quantizer_rotor.py`** — `RotorQuantizer`, a drop-in replacement for
+  `PolarQuantizer` that replaces the dense d×d Haar rotation with
+  block-diagonal 3×3 quaternion rotations (Clifford rotors from Cl(3,0)).
+  Identical Lloyd-Max codebooks and norm-preservation logic; identical
+  reconstruction quality (CosSim, NMSE) at all tested bit widths and model
+  profiles.
+
+  Key properties:
+  - O(d) rotation cost vs O(d²) for PolarQuantizer — 44× fewer rotation
+    parameters (128 vs 16,384 at d=128)
+  - Supports any `head_dim` including non-multiples of 3 (remainder
+    dimensions pass through unrotated)
+  - Same `quantize(x) → (indices, norms)` / `dequantize(indices, norms) → x`
+    API as `PolarQuantizer`
+  - Fallback to numpy einsum on PyTorch backend
+
+- **Fused Metal kernels** (`kernels/__init__.py`) — `metal_rotor_quantize`
+  and `metal_rotor_dequantize`: two new MSL kernels that fuse L2-norm +
+  block-diagonal rotor rotation + centroid argmin into single GPU dispatches.
+  Auto-activated on MLX ≥ 0.16 + Metal. Benchmarked on M5 Max:
+
+  | d | PolarQuant (Metal) | RotorQuant (Metal) | Speedup |
+  |---|---|---|---|
+  | 64 | 0.64 ms | 0.34 ms | 1.9× |
+  | 128 | 0.67 ms | 0.22 ms | **3.0×** |
+  | 256 | 1.54 ms | 0.33 ms | **4.7×** |
+
+  Speedup grows with d because the rotation cost is O(d) vs O(d²) — the
+  d=256 advantage (4.7×) demonstrates the asymptotic benefit clearly.
+
+- **RotorQuant pipeline configs** (`benchmarks/benchmark_pipeline.py`) —
+  five new configs (`rotorquant+bare`, `rotorquant+tiered`, `rotorquant+delta`,
+  `rotorquant+delta2`, `rotorquant+window`) benchmarked against all 7 model
+  profiles. Mean NMSE and CosSim are statistically indistinguishable from
+  their PolarQuant equivalents across 7 model profiles × 5 steps.
+
+- **Tests** — 122 new tests across two files:
+  - `tests/test_rotor_quantizer.py` — shape/dtype contracts, cosine
+    similarity, MSE-vs-bits monotonicity, determinism, seed isolation, zero
+    vectors, batch dims, remainder dimensions (d=65, d=127), quaternion
+    orthogonality invariant, Metal flag detection on MLX vs PyTorch
+  - `tests/test_metal_rotor_kernels.py` — Metal vs Python index/norm/
+    reconstruction parity, round-trip cosine, batch shapes, zero vector,
+    Metal fallback via monkeypatch, high-level API consistency
+
+  Total test count: 577 (up from 455).
+
+Reference: Pope, J.D. (2026). "RotorQuant: Clifford Algebra Vector
+Quantization for LLM KV Cache Compression." https://www.scrya.com/rotorquant/
+
 ## [0.4.0] - 2026-04-06
 
 The v0.4 cycle turns tqai from a single-algorithm KV cache compressor
