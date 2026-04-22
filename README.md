@@ -192,13 +192,25 @@ note at the top of this README and [`reports/kv_memory_finding.md`](reports/kv_m
 
 ## How It Works
 
-tqai implements PolarQuant — the core of TurboQuant Stage 1 — via three steps applied to each KV vector at generation time:
+tqai implements two complementary quantizers, both using Lloyd-Max codebooks and the same norm-preservation trick:
 
-1. **Random orthogonal rotation** — Rotates KV vectors by a fixed Haar-distributed matrix to spread information uniformly across all coordinates
-2. **Lloyd-Max scalar quantization** — Quantizes each coordinate independently using precomputed optimal codebooks derived from the known post-rotation distribution
-3. **Norm preservation** — Stores the vector norm separately in FP16 for lossless magnitude reconstruction
+#### PolarQuantizer (default) — TurboQuant Stage 1
 
-No training, calibration, or model-specific tuning required. Fully data-oblivious — the same codebooks work for any model.
+1. **Random orthogonal rotation** — Rotates KV vectors by a fixed Haar-distributed d×d matrix to spread information uniformly
+2. **Lloyd-Max scalar quantization** — Quantizes each coordinate using precomputed optimal codebooks for the known post-rotation distribution N(0, 1/d)
+3. **Norm preservation** — Stores the L2 norm separately in FP16
+
+#### RotorQuantizer — RotorQuant (Pope 2026)
+
+Replaces the d×d dense rotation with **block-diagonal 3×3 quaternion rotations** (Clifford rotors from Cl(3,0)). Each group of 3 dimensions is independently rotated by a random unit quaternion, costing O(d) operations instead of O(d²). Quality is identical to PolarQuantizer; the fused Metal kernel runs **2–5× faster** on Apple Silicon at the rotation step.
+
+| d | PolarQuant (Metal) | RotorQuant (Metal) | Speedup |
+|---|---|---|---|
+| 64 | 0.64 ms | 0.34 ms | 1.9× |
+| 128 | 0.67 ms | 0.22 ms | **3.0×** |
+| 256 | 1.54 ms | 0.33 ms | **4.7×** |
+
+Both quantizers are fully data-oblivious — no training or calibration required.
 
 ### Cache Strategies (v0.3.1)
 
@@ -304,6 +316,7 @@ framework to drop in your own.
 | Paper | Plugin | Module | Implements |
 |-------|--------|--------|------------|
 | **TurboQuant** ([arXiv:2504.19874](https://arxiv.org/abs/2504.19874), Zandieh et al., ICLR 2026) | `palm` scorer | `scorers/palm.py` | EMA novelty/surprise scoring |
+| **RotorQuant** ([Pope 2026](https://www.scrya.com/rotorquant/)) | `RotorQuantizer` | `quantizer_rotor.py` | Block-diagonal Clifford rotor rotation; fused Metal kernel 2–5× faster than PolarQuantizer at equal quality |
 | **Min-SNR Weighting** ([arXiv:2303.09556](https://arxiv.org/abs/2303.09556), Hang et al., ICCV 2023) | `snr` scorer | `scorers/snr.py` | Cosine + linear diffusion schedule scoring |
 | **APTQ** ([arXiv:2402.14866](https://arxiv.org/abs/2402.14866), Guan et al., DAC 2024) + **Fisher Information** ([arXiv:1906.08589](https://arxiv.org/abs/1906.08589), Frantar et al.) | `fisher` (runtime proxy, broken) + **`fisher_static`** (offline calibration, works) | `scorers/fisher.py`, `scorers/fisher_static.py`, `optimization/fisher_calibration.py` | Two implementations: the runtime `fisher` uses `mean(x²)` proxy and over-allocates bits (don't use); the offline `calibrate_fisher()` does real forward+backward passes on a calibration set, computes per-layer K/V Fisher diagonals, saves to JSON; the `fisher_static` scorer loads the JSON and serves precomputed scores at runtime (constant-time lookup, no per-call overhead) |
 | **Sheaf Attention** ([arXiv:2601.21207](https://arxiv.org/abs/2601.21207), AAAI 2026) | `sheaf` scorer | `scorers/sheaf.py` | Discrete Laplacian harmonicity classifier |
@@ -365,6 +378,8 @@ print(best.decode(scorers, strategies, monitors))
 | Plugin / config | Verdict on Apple Silicon |
 |-----------------|--------------------------|
 | `bits_k=4, bits_v=2` (v0.3.1 default) | **Ship it** — byte-identical to baseline on 6 models |
+| `RotorQuantizer` (MLX + Metal) | **Ship it** — 2–5× faster rotation than PolarQuantizer at identical quality; fused Metal kernel, no Python round-trip |
+| `RotorQuantizer` (PyTorch / no Metal) | **Don't use for perf** — numpy round-trip negates the O(d) advantage; identical quality but slower |
 | `optimize_vae_memory()` for WAN/LTX | **Ship it** — eliminates 100 GB+ VAE spike |
 | `patch_mps_compatibility()` for LTX-2 | **Ship it** — pure unblocker (float64 → float32 RoPE) |
 | `palm` + `delta` / `snr` + `delta2` | **Ship it** — −60% NMSE on synthetic streaming data |
@@ -547,6 +562,7 @@ src/tqai/
 ├── config.py              # Configuration dataclass
 ├── _patch.py              # Backend router (HF / mlx-lm / DiT)
 ├── quantizer.py           # PolarQuantizer (core algorithm + QJL Stage 2)
+├── quantizer_rotor.py     # RotorQuantizer (Clifford rotor block-diagonal rotation, Pope 2026)
 ├── attention.py           # Chunked SDPA via online softmax (MLX, v0.4)
 ├── kernels/               # Fused Metal GPU kernels
 ├── hooks.py               # Forward-pass activation compression (PyTorch + MLX)

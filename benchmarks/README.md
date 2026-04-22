@@ -15,6 +15,28 @@ Raw JSON results per model are also in [`results/`](results/).
 
 ## Scripts
 
+### `benchmark_pipeline.py` — Pipeline scorer × strategy quality benchmark
+
+Tests every scorer × strategy combination (including RotorQuant configs) on
+synthetic data matching real model dimensions across 7 model profiles.
+
+```bash
+# Run all configs (PolarQuant + RotorQuant) on all model profiles
+python benchmarks/benchmark_pipeline.py
+
+# Save results to a custom path
+python benchmarks/benchmark_pipeline.py --json results/my_run.json
+```
+
+Output columns: `Config | NMSE | CosSim | Comp ms | Decomp ms | Ratio`
+
+RotorQuant configs are prefixed with `rotorquant+` and use `RotorQuantizer`
+(block-diagonal Clifford rotors) instead of `PolarQuantizer` (dense Haar
+matrix). Quality (NMSE, CosSim) is identical at all bit widths; Metal kernel
+speed advantage is visible when using the MLX backend.
+
+---
+
 ### `benchmark_forward.py` — KV + activation compression benchmark
 
 Measures perplexity, throughput, and token match rate across all compression configs for a given model.

@@ -31,6 +31,7 @@ from tqai.config import TurboQuantConfig
 from tqai.pipeline import build_pipeline
 from tqai.pipeline.registry import list_available
 from tqai.quantizer import PolarQuantizer
+from tqai.quantizer_rotor import RotorQuantizer
 
 # ---------------------------------------------------------------------------
 # Model dimension profiles
@@ -62,6 +63,12 @@ PIPELINE_CONFIGS = {
     "palm+tiered+stab":   {"scorer": "palm",   "strategy": "tiered", "monitor": "stability"},
     "snr+delta2+lyap":    {"scorer": "snr",    "strategy": "delta2", "monitor": "lyapunov"},
     "skip_layers":        {"scorer": "palm",   "strategy": "tiered", "skip_layers": [0, 1, 2, 3]},
+    # RotorQuant configs (block-diagonal Clifford rotor rotation, Pope 2026)
+    "rotorquant+bare":    {"_quantizer": "rotor"},
+    "rotorquant+tiered":  {"scorer": "palm",   "strategy": "tiered", "_quantizer": "rotor"},
+    "rotorquant+delta":   {"scorer": "palm",   "strategy": "delta",  "_quantizer": "rotor"},
+    "rotorquant+delta2":  {"scorer": "snr",    "strategy": "delta2", "_quantizer": "rotor"},
+    "rotorquant+window":  {"scorer": "palm",   "strategy": "window", "_quantizer": "rotor"},
 }
 
 
@@ -124,11 +131,17 @@ def benchmark_config(
     total_decompress_time = 0.0
     count = 0
 
-    for layer_idx in range(n_layers):
-        quantizer = PolarQuantizer(head_dim=head_dim, bits=bits_k, seed=42 + layer_idx, ops=ops)
-        quantizer_low = PolarQuantizer(head_dim=head_dim, bits=bits_v, seed=42 + layer_idx + 10000, ops=ops)
+    # Select quantizer class based on config
+    use_rotor = pipeline_cfg is not None and pipeline_cfg.get("_quantizer") == "rotor"
+    quantizer_cls = RotorQuantizer if use_rotor else PolarQuantizer
 
-        config = TurboQuantConfig(bits_k=bits_k, bits_v=bits_v, backend="torch", pipeline=pipeline_cfg)
+    for layer_idx in range(n_layers):
+        quantizer = quantizer_cls(head_dim=head_dim, bits=bits_k, seed=42 + layer_idx, ops=ops)
+        quantizer_low = quantizer_cls(head_dim=head_dim, bits=bits_v, seed=42 + layer_idx + 10000, ops=ops)
+
+        # Strip internal _quantizer key before passing to pipeline registry
+        clean_cfg = {k: v for k, v in pipeline_cfg.items() if not k.startswith("_")} if pipeline_cfg else pipeline_cfg
+        config = TurboQuantConfig(bits_k=bits_k, bits_v=bits_v, backend="torch", pipeline=clean_cfg)
         pipe = build_pipeline(config, quantizer=quantizer, quantizer_low=quantizer_low)
 
         for step_idx, x in enumerate(steps_data):
