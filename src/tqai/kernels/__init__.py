@@ -604,3 +604,170 @@ def metal_aggregate_values(
         threadgroup=(min(D, 1024), 1, 1),
     )
     return out_rotated
+
+
+# ---------------------------------------------------------------------------
+# Batched multi-head fused kernels (v0.6)
+#
+# Collapse the Python head loop into a single Metal dispatch per kernel.
+# Grid is 2-D: (n_kv_heads, T_kv) for scoring, (n_kv_heads, D) for
+# aggregation.  Each thread handles all GQA repeats for its KV head.
+# ---------------------------------------------------------------------------
+
+_BATCHED_SCORE_KEYS_TEMPLATE = """
+    // Grid: (n_kv_heads, T_kv, 1)
+    // Thread (h_kv, k) scores key k for all query heads mapping to h_kv.
+    uint h_kv = thread_position_in_grid.x;
+    uint k    = thread_position_in_grid.y;
+    const uint D       = {D};
+    const uint REPEATS = {REPEATS};
+    const uint T_KV    = t_kv[0];
+    const uint N_KV    = n_kv[0];
+
+    uint idx_base = (h_kv * T_KV + k) * D;
+    float norm_k  = (float)k_norms[h_kv * T_KV + k];
+
+    for (uint r = 0; r < REPEATS; r++) {{
+        uint h_q = h_kv * REPEATS + r;
+        float score = 0.0f;
+        for (uint d = 0; d < D; d++) {{
+            float q_d = q_rotated[h_q * D + d];
+            uint8_t idx = k_indices[idx_base + d];
+            score += q_d * centroids[idx];
+        }}
+        scores_out[h_q * T_KV + k] = score * norm_k;
+    }}
+"""
+
+_BATCHED_AGGREGATE_VALUES_TEMPLATE = """
+    // Grid: (n_kv_heads, D, 1)
+    // Thread (h_kv, d) aggregates dimension d for all query heads mapping to h_kv.
+    uint h_kv = thread_position_in_grid.x;
+    uint d    = thread_position_in_grid.y;
+    const uint D_DIM   = {D};
+    const uint REPEATS = {REPEATS};
+    const uint T_KV    = t_kv[0];
+    const uint N_KV    = n_kv[0];
+
+    for (uint r = 0; r < REPEATS; r++) {{
+        uint h_q = h_kv * REPEATS + r;
+        float acc = 0.0f;
+        for (uint k = 0; k < T_KV; k++) {{
+            float w = weights[h_q * T_KV + k] * (float)v_norms[h_kv * T_KV + k];
+            uint8_t idx = v_indices[(h_kv * T_KV + k) * D_DIM + d];
+            acc += w * centroids[idx];
+        }}
+        out_rotated[h_q * D_DIM + d] = acc;
+    }}
+"""
+
+
+@functools.lru_cache(maxsize=64)
+def _get_batched_score_keys_kernel(D: int, n_levels: int, repeats: int):
+    source = _BATCHED_SCORE_KEYS_TEMPLATE.format(D=D, REPEATS=repeats)
+    return mx.fast.metal_kernel(
+        name=f"batched_score_keys_{D}_{n_levels}_r{repeats}",
+        input_names=["q_rotated", "k_indices", "k_norms", "centroids",
+                      "t_kv", "n_kv"],
+        output_names=["scores_out"],
+        source=source,
+    )
+
+
+@functools.lru_cache(maxsize=64)
+def _get_batched_aggregate_values_kernel(D: int, n_levels: int, repeats: int):
+    source = _BATCHED_AGGREGATE_VALUES_TEMPLATE.format(D=D, REPEATS=repeats)
+    return mx.fast.metal_kernel(
+        name=f"batched_aggregate_values_{D}_{n_levels}_r{repeats}",
+        input_names=["weights", "v_norms", "v_indices", "centroids",
+                      "t_kv", "n_kv"],
+        output_names=["out_rotated"],
+        source=source,
+    )
+
+
+def metal_batched_score_keys(
+    q_rotated: mx.array,
+    k_indices: mx.array,
+    k_norms: mx.array,
+    centroids: mx.array,
+    repeats: int,
+) -> mx.array:
+    """Batched fused gather-dot: score all keys for all heads in one dispatch.
+
+    Args:
+        q_rotated: Pre-rotated queries, shape ``(n_q_heads, D)``, float32.
+        k_indices: uint8 key indices, shape ``(n_kv_heads, T_kv, D)``.
+        k_norms: float16 key norms, shape ``(n_kv_heads, T_kv)`` or
+            ``(n_kv_heads, T_kv, 1)``.
+        centroids: Lloyd-Max codebook, shape ``(n_levels,)``, float32.
+        repeats: GQA repeat factor (``n_q_heads // n_kv_heads``).
+
+    Returns:
+        Scores ``(n_q_heads, T_kv)``, float32.
+    """
+    n_q_heads, D = q_rotated.shape
+    n_kv_heads = k_indices.shape[0]
+    T_kv = k_indices.shape[1]
+    n_levels = centroids.shape[0]
+
+    kernel = _get_batched_score_keys_kernel(D, n_levels, repeats)
+    (scores,) = kernel(
+        inputs=[
+            q_rotated.reshape(-1).astype(mx.float32),
+            k_indices.reshape(-1),
+            k_norms.reshape(-1).astype(mx.float16),
+            centroids.astype(mx.float32),
+            mx.array([T_kv], dtype=mx.uint32),
+            mx.array([n_kv_heads], dtype=mx.uint32),
+        ],
+        output_shapes=[(n_q_heads * T_kv,)],
+        output_dtypes=[mx.float32],
+        grid=(n_kv_heads, T_kv, 1),
+        threadgroup=(1, 1, 1),
+    )
+    return scores.reshape(n_q_heads, T_kv)
+
+
+def metal_batched_aggregate_values(
+    weights: mx.array,
+    v_indices: mx.array,
+    v_norms: mx.array,
+    centroids: mx.array,
+    repeats: int,
+) -> mx.array:
+    """Batched fused weighted-gather: aggregate values for all heads in one dispatch.
+
+    Args:
+        weights: Softmax weights, shape ``(n_q_heads, T_kv)``, float32.
+        v_indices: uint8 value indices, shape ``(n_kv_heads, T_kv, D)``.
+        v_norms: float16 value norms, shape ``(n_kv_heads, T_kv)`` or
+            ``(n_kv_heads, T_kv, 1)``.
+        centroids: Lloyd-Max codebook, shape ``(n_levels,)``, float32.
+        repeats: GQA repeat factor.
+
+    Returns:
+        Aggregated values in rotated space, ``(n_q_heads, D)``, float32.
+    """
+    n_q_heads = weights.shape[0]
+    n_kv_heads = v_indices.shape[0]
+    D = v_indices.shape[2]
+    T_kv = v_indices.shape[1]
+    n_levels = centroids.shape[0]
+
+    kernel = _get_batched_aggregate_values_kernel(D, n_levels, repeats)
+    (out_rotated,) = kernel(
+        inputs=[
+            weights.reshape(-1).astype(mx.float32),
+            v_norms.reshape(-1).astype(mx.float16),
+            v_indices.reshape(-1),
+            centroids.astype(mx.float32),
+            mx.array([T_kv], dtype=mx.uint32),
+            mx.array([n_kv_heads], dtype=mx.uint32),
+        ],
+        output_shapes=[(n_q_heads * D,)],
+        output_dtypes=[mx.float32],
+        grid=(n_kv_heads, D, 1),
+        threadgroup=(1, min(D, 1024), 1),
+    )
+    return out_rotated.reshape(n_q_heads, D)

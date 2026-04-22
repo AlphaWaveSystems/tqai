@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-04-22
+
+### Added — Batched multi-head Metal kernels + end-to-end validation
+
+- **`metal_batched_score_keys` / `metal_batched_aggregate_values`** —
+  batched Metal kernels that process all KV heads × GQA repeats in a
+  single dispatch.  Replaces the v0.5 Python head loop (2×n_q_heads
+  dispatches) with exactly 2 total dispatches per decode step.
+
+- **`batched_fused_polar_decode_v2` / `batched_fused_rotor_decode_v2`** —
+  high-level batched decode functions for B=1, T_q=1 hot path.
+
+- **`compute_fused_attention`** now auto-selects the v0.6 batched path
+  for B=1, T_q=1 decode.  Falls back to the per-head loop for prefill
+  (T_q > 1) or multi-batch.
+
+- **Compressed strategy wired into `tqai.patch()`**: calling
+  `tqai.patch(model, cache_strategy="compressed")` now automatically
+  patches SDPA for fused decode.  `tqai.unpatch()` cleans up correctly.
+
+- **`benchmarks/eval_e2e.py`** — end-to-end evaluation script measuring
+  generation quality and autoregressive perplexity across strategies.
+
+- **Benchmark Section 3** expanded with 5 model geometries (Llama-3-8B,
+  Llama-3-70B, Mistral-7B, Qwen2-7B) and context lengths up to 131K.
+  **Section 3b** added: memory capacity analysis across device budgets.
+
+### Changed
+
+- **Default bits changed to 8/8** (was 4/2). End-to-end evaluation on
+  Qwen2.5-3B showed that 4-bit quantization causes 2.5× PPL degradation
+  due to error compounding across layers.  At 8-bit the quantization is
+  near-lossless (PPL +0.0%) while still achieving 2× KV cache capacity
+  via the norm-direction decomposition (uint8 indices + fp16 norms vs
+  fp16 full vectors).
+
+  Bit-width quality ladder (Qwen2.5-3B-Instruct-4bit, 256 tokens):
+  ```
+  8-bit: PPL 3.33 (+0.0%)  — lossless
+  6-bit: PPL 3.36 (+0.9%)  — near-lossless
+  4-bit: PPL 8.32 (+150%)  — degraded
+  2-bit: PPL 952   (286×)  — unusable
+  ```
+
 ## [0.5.0] - 2026-04-22
 
 ### Added — Fused dequant-attention and bit-packing

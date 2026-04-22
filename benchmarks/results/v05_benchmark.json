@@ -1,0 +1,175 @@
+{
+  "capacity": {
+    "llama_3_8b": {
+      "n_layers": 32,
+      "D": 128,
+      "n_kv": 8,
+      "n_q": 32,
+      "weight_gb": 16.0,
+      "points": {
+        "24": {
+          "kv_budget_gb": 8.0,
+          "max_ctx_fp16": 65536,
+          "max_ctx_v06": 129055,
+          "multiplier": 1.9692230224609375
+        },
+        "36": {
+          "kv_budget_gb": 20.0,
+          "max_ctx_fp16": 163840,
+          "max_ctx_v06": 322638,
+          "multiplier": 1.96922607421875
+        },
+        "48": {
+          "kv_budget_gb": 32.0,
+          "max_ctx_fp16": 262144,
+          "max_ctx_v06": 516222,
+          "multiplier": 1.9692306518554688
+        },
+        "64": {
+          "kv_budget_gb": 48.0,
+          "max_ctx_fp16": 393216,
+          "max_ctx_v06": 774333,
+          "multiplier": 1.9692306518554688
+        }
+      }
+    },
+    "qwen2_7b": {
+      "n_layers": 32,
+      "D": 128,
+      "n_kv": 4,
+      "n_q": 28,
+      "weight_gb": 14.5,
+      "points": {
+        "16": {
+          "kv_budget_gb": 1.5,
+          "max_ctx_fp16": 24576,
+          "max_ctx_v06": 48395,
+          "multiplier": 1.9691975911458333
+        },
+        "24": {
+          "kv_budget_gb": 9.5,
+          "max_ctx_fp16": 155648,
+          "max_ctx_v06": 306506,
+          "multiplier": 1.969225431743421
+        },
+        "36": {
+          "kv_budget_gb": 21.5,
+          "max_ctx_fp16": 352256,
+          "max_ctx_v06": 693673,
+          "multiplier": 1.9692297647165697
+        },
+        "48": {
+          "kv_budget_gb": 33.5,
+          "max_ctx_fp16": 548864,
+          "max_ctx_v06": 1080839,
+          "multiplier": 1.9692291715251866
+        },
+        "64": {
+          "kv_budget_gb": 49.5,
+          "max_ctx_fp16": 811008,
+          "max_ctx_v06": 1597061,
+          "multiplier": 1.9692296500157829
+        }
+      }
+    },
+    "llama_3_70b": {
+      "n_layers": 80,
+      "D": 128,
+      "n_kv": 8,
+      "n_q": 64,
+      "weight_gb": 40.0,
+      "points": {
+        "48": {
+          "kv_budget_gb": 8.0,
+          "max_ctx_fp16": 26214,
+          "max_ctx_v06": 51622,
+          "multiplier": 1.9692530708781568
+        },
+        "64": {
+          "kv_budget_gb": 24.0,
+          "max_ctx_fp16": 78643,
+          "max_ctx_v06": 154866,
+          "multiplier": 1.969228030466793
+        }
+      }
+    },
+    "mistral_7b": {
+      "n_layers": 32,
+      "D": 128,
+      "n_kv": 8,
+      "n_q": 32,
+      "weight_gb": 14.5,
+      "points": {
+        "16": {
+          "kv_budget_gb": 1.5,
+          "max_ctx_fp16": 12288,
+          "max_ctx_v06": 24197,
+          "multiplier": 1.9691569010416667
+        },
+        "24": {
+          "kv_budget_gb": 9.5,
+          "max_ctx_fp16": 77824,
+          "max_ctx_v06": 153253,
+          "multiplier": 1.969225431743421
+        },
+        "36": {
+          "kv_budget_gb": 21.5,
+          "max_ctx_fp16": 176128,
+          "max_ctx_v06": 346836,
+          "multiplier": 1.969226925872093
+        },
+        "48": {
+          "kv_budget_gb": 33.5,
+          "max_ctx_fp16": 274432,
+          "max_ctx_v06": 540419,
+          "multiplier": 1.969227349580224
+        },
+        "64": {
+          "kv_budget_gb": 49.5,
+          "max_ctx_fp16": 405504,
+          "max_ctx_v06": 798530,
+          "multiplier": 1.9692284169823233
+        }
+      }
+    },
+    "quality": {
+      "2": {
+        "nmse": 0.11619248758323583,
+        "cosine_sim": 0.9404732160690472,
+        "capacity_ratio": 1.9692307692307693
+      },
+      "4": {
+        "nmse": 0.00929669672849795,
+        "cosine_sim": 0.9954191277964143,
+        "capacity_ratio": 1.9692307692307693
+      }
+    },
+    "live_decode": {
+      "device_gb": 24,
+      "model": "Llama-3-8B",
+      "points": {
+        "4096": {
+          "fp16_fits": true,
+          "v06_fits": true,
+          "v04_ms": 0.03654148895293474,
+          "v06_ms": 0.0507709919475019,
+          "speedup": 0.7197316331876928
+        },
+        "65536": {
+          "fp16_fits": true,
+          "v06_fits": true,
+          "v04_ms": 0.030229042749851942,
+          "v06_ms": 0.050083035603165627,
+          "speedup": 0.6035784849259664
+        },
+        "129055": {
+          "fp16_fits": false,
+          "v06_fits": true,
+          "v04_ms": 0.027499976567924023,
+          "v06_ms": 0.04618801176548004,
+          "speedup": 0.5953920837198048
+        }
+      }
+    }
+  }
+}

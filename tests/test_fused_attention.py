@@ -288,3 +288,351 @@ def test_score_keys_large_sequence(mlx_ops):
     assert scores.shape == (T_kv,)
     assert not np.any(np.isnan(np.array(scores)))
     assert not np.any(np.isinf(np.array(scores)))
+
+
+# ---------------------------------------------------------------------------
+# Batched multi-head kernels (v0.6)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("head_dim,bits,n_kv,repeats", [
+    (64, 4, 2, 2),
+    (128, 4, 4, 1),
+    (64, 4, 2, 4),
+])
+def test_batched_score_keys_matches_per_head(head_dim, bits, n_kv, repeats, mlx_ops):
+    """metal_batched_score_keys must match calling metal_score_keys per head."""
+    from tqai.kernels import metal_batched_score_keys
+
+    T_kv = 32
+    n_q = n_kv * repeats
+    pq = _make_pq(head_dim, bits, mlx_ops)
+    centroids = pq._centroids
+    R = pq._rotation
+
+    # Generate per-head quantized data
+    k_indices_all = []
+    k_norms_all = []
+    for h in range(n_kv):
+        x = mx.random.normal((T_kv, head_dim), key=mx.random.key(200 + h))
+        _mlx_eval(x)
+        idx, nrm = pq.quantize(x)
+        _mlx_eval(idx, nrm)
+        k_indices_all.append(idx)
+        k_norms_all.append(mx.reshape(nrm, (T_kv,)))
+
+    k_indices = mx.stack(k_indices_all, axis=0)  # (n_kv, T_kv, D)
+    k_norms = mx.stack(k_norms_all, axis=0)      # (n_kv, T_kv)
+
+    # Generate rotated queries
+    queries_raw = mx.random.normal((n_q, head_dim), key=mx.random.key(300))
+    _mlx_eval(queries_raw)
+    q_rotated = queries_raw @ mx.array(R).T  # (n_q, D)
+    _mlx_eval(q_rotated)
+
+    # Reference: per-head calls
+    ref_scores = []
+    for h_q in range(n_q):
+        h_kv = h_q // repeats
+        s = metal_score_keys(
+            q_rotated[h_q], k_indices[h_kv], k_norms[h_kv], centroids
+        )
+        _mlx_eval(s)
+        ref_scores.append(np.array(s))
+    ref_scores = np.stack(ref_scores, axis=0)  # (n_q, T_kv)
+
+    # Batched call
+    batched_scores = metal_batched_score_keys(
+        q_rotated, k_indices, k_norms, centroids, repeats
+    )
+    _mlx_eval(batched_scores)
+
+    np.testing.assert_allclose(
+        np.array(batched_scores), ref_scores, atol=1e-5, rtol=1e-5,
+        err_msg="Batched score keys diverged from per-head"
+    )
+
+
+@pytest.mark.parametrize("head_dim,bits,n_kv,repeats", [
+    (64, 4, 2, 2),
+    (128, 4, 4, 1),
+])
+def test_batched_aggregate_values_matches_per_head(head_dim, bits, n_kv, repeats, mlx_ops):
+    """metal_batched_aggregate_values must match per-head calls."""
+    from tqai.kernels import metal_batched_aggregate_values
+
+    T_kv = 32
+    n_q = n_kv * repeats
+    pq = _make_pq(head_dim, bits, mlx_ops)
+    centroids = pq._centroids
+
+    v_indices_all = []
+    v_norms_all = []
+    for h in range(n_kv):
+        x = mx.random.normal((T_kv, head_dim), key=mx.random.key(400 + h))
+        _mlx_eval(x)
+        idx, nrm = pq.quantize(x)
+        _mlx_eval(idx, nrm)
+        v_indices_all.append(idx)
+        v_norms_all.append(mx.reshape(nrm, (T_kv,)))
+
+    v_indices = mx.stack(v_indices_all, axis=0)  # (n_kv, T_kv, D)
+    v_norms = mx.stack(v_norms_all, axis=0)      # (n_kv, T_kv)
+
+    # Random weights per query head
+    weights_all = []
+    for h_q in range(n_q):
+        w = mx.softmax(mx.random.normal((T_kv,), key=mx.random.key(500 + h_q)), axis=-1)
+        _mlx_eval(w)
+        weights_all.append(w)
+    weights = mx.stack(weights_all, axis=0)  # (n_q, T_kv)
+
+    # Reference: per-head
+    ref_out = []
+    for h_q in range(n_q):
+        h_kv = h_q // repeats
+        o = metal_aggregate_values(
+            weights[h_q], v_indices[h_kv], v_norms[h_kv], centroids
+        )
+        _mlx_eval(o)
+        ref_out.append(np.array(o))
+    ref_out = np.stack(ref_out, axis=0)  # (n_q, D)
+
+    # Batched
+    batched_out = metal_batched_aggregate_values(
+        weights, v_indices, v_norms, centroids, repeats
+    )
+    _mlx_eval(batched_out)
+
+    np.testing.assert_allclose(
+        np.array(batched_out), ref_out, atol=1e-5, rtol=1e-5,
+        err_msg="Batched aggregate values diverged from per-head"
+    )
+
+
+def test_batched_v2_matches_loop(mlx_ops):
+    """batched_fused_polar_decode_v2 output matches the per-head loop."""
+    from tqai.attention_fused import (
+        batched_fused_polar_decode,
+        batched_fused_polar_decode_v2,
+    )
+
+    B, n_q, T_q, D, bits = 1, 4, 1, 64, 4
+    n_kv = 2
+    T_kv = 32
+    pq = _make_pq(D, bits, mlx_ops)
+    scale = D**-0.5
+
+    queries = mx.random.normal((B, n_q, T_q, D), key=mx.random.key(600))
+    _mlx_eval(queries)
+
+    # Build quantized cache
+    k_indices_all = []
+    k_norms_all = []
+    v_indices_all = []
+    v_norms_all = []
+    for h in range(n_kv):
+        xk = mx.random.normal((T_kv, D), key=mx.random.key(610 + h))
+        xv = mx.random.normal((T_kv, D), key=mx.random.key(620 + h))
+        _mlx_eval(xk, xv)
+        ki, kn = pq.quantize(xk)
+        vi, vn = pq.quantize(xv)
+        _mlx_eval(ki, kn, vi, vn)
+        k_indices_all.append(ki)
+        k_norms_all.append(kn)
+        v_indices_all.append(vi)
+        v_norms_all.append(vn)
+
+    k_idx = mx.stack(k_indices_all, axis=0)[None]  # (1, n_kv, T_kv, D)
+    k_nrm = mx.stack(k_norms_all, axis=0)[None]    # (1, n_kv, T_kv, 1)
+    v_idx = mx.stack(v_indices_all, axis=0)[None]
+    v_nrm = mx.stack(v_norms_all, axis=0)[None]
+
+    R = pq._rotation
+    centroids = pq._centroids
+
+    # v0.5 per-head loop
+    out_loop = batched_fused_polar_decode(
+        queries, k_idx, k_nrm, v_idx, v_nrm, R, centroids, scale
+    )
+    _mlx_eval(out_loop)
+
+    # v0.6 batched
+    out_batched = batched_fused_polar_decode_v2(
+        queries, k_idx, k_nrm, v_idx, v_nrm,
+        R, R, centroids, centroids, scale,
+    )
+    _mlx_eval(out_batched)
+
+    np.testing.assert_allclose(
+        np.array(out_batched), np.array(out_loop), atol=5e-3, rtol=1e-3,
+        err_msg="v0.6 batched diverged from v0.5 per-head loop"
+    )
+
+
+def test_batched_v2_with_sinks(mlx_ops):
+    """batched_fused_polar_decode_v2 handles sinks correctly."""
+    from tqai.attention_fused import batched_fused_polar_decode_v2
+
+    B, n_q, D, bits = 1, 4, 64, 4
+    n_kv = 2
+    T_c, T_s = 24, 4
+    pq = _make_pq(D, bits, mlx_ops)
+    scale = D**-0.5
+
+    queries = mx.random.normal((B, n_q, 1, D), key=mx.random.key(700))
+    sink_keys = mx.random.normal((B, n_kv, T_s, D), key=mx.random.key(710))
+    sink_values = mx.random.normal((B, n_kv, T_s, D), key=mx.random.key(711))
+    _mlx_eval(queries, sink_keys, sink_values)
+
+    k_indices_all = []
+    k_norms_all = []
+    v_indices_all = []
+    v_norms_all = []
+    for h in range(n_kv):
+        xk = mx.random.normal((T_c, D), key=mx.random.key(720 + h))
+        xv = mx.random.normal((T_c, D), key=mx.random.key(730 + h))
+        _mlx_eval(xk, xv)
+        ki, kn = pq.quantize(xk)
+        vi, vn = pq.quantize(xv)
+        _mlx_eval(ki, kn, vi, vn)
+        k_indices_all.append(ki)
+        k_norms_all.append(kn)
+        v_indices_all.append(vi)
+        v_norms_all.append(vn)
+
+    k_idx = mx.stack(k_indices_all, axis=0)[None]
+    k_nrm = mx.stack(k_norms_all, axis=0)[None]
+    v_idx = mx.stack(v_indices_all, axis=0)[None]
+    v_nrm = mx.stack(v_norms_all, axis=0)[None]
+
+    R = pq._rotation
+    centroids = pq._centroids
+
+    out = batched_fused_polar_decode_v2(
+        queries, k_idx, k_nrm, v_idx, v_nrm,
+        R, R, centroids, centroids, scale,
+        sink_keys, sink_values,
+    )
+    _mlx_eval(out)
+
+    assert out.shape == (B, n_q, 1, D)
+    assert not np.any(np.isnan(np.array(out)))
+
+
+def test_batched_v2_gqa(mlx_ops):
+    """batched_fused_polar_decode_v2 handles GQA with repeats=4."""
+    from tqai.attention_fused import batched_fused_polar_decode_v2
+
+    B, n_q, D, bits = 1, 8, 64, 4
+    n_kv = 2  # repeats = 4
+    T_kv = 16
+    pq = _make_pq(D, bits, mlx_ops)
+    scale = D**-0.5
+
+    queries = mx.random.normal((B, n_q, 1, D), key=mx.random.key(800))
+    _mlx_eval(queries)
+
+    k_indices_all = []
+    k_norms_all = []
+    v_indices_all = []
+    v_norms_all = []
+    for h in range(n_kv):
+        xk = mx.random.normal((T_kv, D), key=mx.random.key(810 + h))
+        xv = mx.random.normal((T_kv, D), key=mx.random.key(820 + h))
+        _mlx_eval(xk, xv)
+        ki, kn = pq.quantize(xk)
+        vi, vn = pq.quantize(xv)
+        _mlx_eval(ki, kn, vi, vn)
+        k_indices_all.append(ki)
+        k_norms_all.append(kn)
+        v_indices_all.append(vi)
+        v_norms_all.append(vn)
+
+    k_idx = mx.stack(k_indices_all, axis=0)[None]
+    k_nrm = mx.stack(k_norms_all, axis=0)[None]
+    v_idx = mx.stack(v_indices_all, axis=0)[None]
+    v_nrm = mx.stack(v_norms_all, axis=0)[None]
+
+    R = pq._rotation
+    centroids = pq._centroids
+
+    out = batched_fused_polar_decode_v2(
+        queries, k_idx, k_nrm, v_idx, v_nrm,
+        R, R, centroids, centroids, scale,
+    )
+    _mlx_eval(out)
+
+    assert out.shape == (B, n_q, 1, D)
+    assert not np.any(np.isnan(np.array(out)))
+
+
+def test_batched_rotor_v2_matches_loop(mlx_ops):
+    """batched_fused_rotor_decode_v2 output matches per-head rotor decode."""
+    from tqai.attention_fused import (
+        fused_rotor_decode_step,
+        batched_fused_rotor_decode_v2,
+    )
+
+    B, n_q, D, bits = 1, 4, 66, 4  # 66 = 22*3, all full groups
+    n_kv = 2
+    T_kv = 24
+    rq = _make_rq(D, bits, mlx_ops)
+    scale = D**-0.5
+    repeats = n_q // n_kv
+
+    queries = mx.random.normal((B, n_q, 1, D), key=mx.random.key(900))
+    _mlx_eval(queries)
+
+    k_indices_all = []
+    k_norms_all = []
+    v_indices_all = []
+    v_norms_all = []
+    for h in range(n_kv):
+        xk = mx.random.normal((T_kv, D), key=mx.random.key(910 + h))
+        xv = mx.random.normal((T_kv, D), key=mx.random.key(920 + h))
+        _mlx_eval(xk, xv)
+        ki, kn = rq.quantize(xk)
+        vi, vn = rq.quantize(xv)
+        _mlx_eval(ki, kn, vi, vn)
+        k_indices_all.append(ki)
+        k_norms_all.append(kn)
+        v_indices_all.append(vi)
+        v_norms_all.append(vn)
+
+    k_idx = mx.stack(k_indices_all, axis=0)  # (n_kv, T_kv, D)
+    k_nrm = mx.stack(k_norms_all, axis=0)
+    v_idx = mx.stack(v_indices_all, axis=0)
+    v_nrm = mx.stack(v_norms_all, axis=0)
+
+    block_mats = rq._block_mats_mlx
+    centroids = rq._centroids_mlx
+    n_full = rq._n_full
+
+    # Reference: per-head loop
+    ref_outputs = []
+    for h_q in range(n_q):
+        h_kv = h_q // repeats
+        out = fused_rotor_decode_step(
+            queries[0, h_q, 0, :],
+            k_idx[h_kv], mx.reshape(k_nrm[h_kv], (T_kv,)),
+            v_idx[h_kv], mx.reshape(v_nrm[h_kv], (T_kv,)),
+            block_mats, centroids, n_full, scale,
+        )
+        _mlx_eval(out)
+        ref_outputs.append(np.array(out))
+    ref = np.stack(ref_outputs, axis=0).reshape(B, n_q, 1, D)
+
+    # v0.6 batched
+    out_batched = batched_fused_rotor_decode_v2(
+        queries,
+        k_idx[None], k_nrm[None], v_idx[None], v_nrm[None],
+        block_mats, block_mats, centroids, centroids,
+        n_full, scale,
+    )
+    _mlx_eval(out_batched)
+
+    np.testing.assert_allclose(
+        np.array(out_batched), ref, atol=5e-3, rtol=1e-3,
+        err_msg="v0.6 batched rotor diverged from per-head loop"
+    )

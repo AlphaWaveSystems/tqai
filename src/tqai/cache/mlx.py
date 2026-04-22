@@ -87,9 +87,10 @@ class TurboQuantMLXCache:
         self._k_norms: Any | None = None
         self._v_indices: Any | None = None
         self._v_norms: Any | None = None
-        # When True (set by patch_fused_attention), update_and_fetch skips assembling
-        # a float32 K/V buffer — the patched SDPA calls compute_fused_attention instead.
-        self._skip_assemble: bool = False
+        # When True, update_and_fetch skips assembling a float32 K/V buffer during
+        # decode — the patched SDPA calls compute_fused_attention instead.
+        # Self-activates for compressed strategy; also set by patch_fused_attention.
+        self._skip_assemble: bool = (self._strategy == "compressed")
 
         self.offset: int = 0
         self._input_dtype = None
@@ -368,7 +369,11 @@ class TurboQuantMLXCache:
 
         Computes multi-head attention without materialising float32 K or V
         buffers.  Handles GQA, sink tokens (full-precision chunks), and
-        compressed tokens (fused Metal kernels) via online softmax.
+        compressed tokens (fused Metal kernels).
+
+        For B=1, T_q=1 (decode), uses the batched v0.6 path — 2 total Metal
+        dispatches regardless of head count.  Falls back to the per-head loop
+        for prefill (T_q > 1) or multi-batch.
 
         Only valid when ``_strategy == "compressed"`` and Metal is available.
         Called by the patched SDPA in ``patch_fused_attention`` during decode.
@@ -381,6 +386,39 @@ class TurboQuantMLXCache:
         Returns:
             Attention output ``[B, n_q_heads, T_q, D]`` float32.
         """
+        import mlx.core as mx
+
+        B, n_q_heads, T_q, D = queries.shape
+
+        # v0.6 fast path: batched multi-head Metal kernels (2 dispatches total)
+        if B == 1 and T_q == 1:
+            from tqai.attention_fused import batched_fused_polar_decode_v2
+
+            R_k = self._k_quantizer._rotation
+            R_v = self._v_quantizer._rotation
+            centroids_k = self._k_quantizer._centroids
+            centroids_v = self._v_quantizer._centroids
+
+            return batched_fused_polar_decode_v2(
+                queries,
+                self._k_indices, self._k_norms,
+                self._v_indices, self._v_norms,
+                R_k, R_v,
+                centroids_k, centroids_v,
+                scale,
+                self._sink_keys, self._sink_values,
+            )
+
+        # Fallback: per-head loop (prefill, multi-batch)
+        return self._compute_fused_attention_loop(queries, scale, causal)
+
+    def _compute_fused_attention_loop(
+        self,
+        queries: Any,
+        scale: float,
+        causal: bool = True,
+    ) -> Any:
+        """Per-head fused attention loop (fallback for T_q > 1 or B > 1)."""
         import mlx.core as mx
         from tqai.kernels import metal_aggregate_values, metal_score_keys
 

@@ -251,15 +251,17 @@ class _MockModel:
 
 
 def test_patch_fused_attention_activates_skip_assemble():
-    """patch_fused_attention sets _skip_assemble on compressed caches."""
+    """Compressed caches self-activate _skip_assemble; patch_fused_attention patches SDPA."""
     from tqai.attention import patch_fused_attention, unpatch_fused_attention
 
     cache = _make_cache("compressed", head_dim=64, n_kv_heads=2)
-    assert not cache._skip_assemble
+    # Compressed caches self-activate _skip_assemble in __init__
+    assert cache._skip_assemble
 
     model = _MockModel()
     patch_fused_attention(model, [cache])
     assert cache._skip_assemble
+    assert hasattr(model, "_tqai_fused_original_sdpa")
 
     unpatch_fused_attention(model)
 
