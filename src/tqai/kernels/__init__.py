@@ -1,4 +1,5 @@
-"""Fused Metal kernels for PolarQuant and RotorQuant quantize/dequantize.
+"""Fused Metal kernels for PolarQuant and RotorQuant quantize/dequantize,
+and fused dequant-attention scoring/aggregation.
 
 Uses ``mx.fast.metal_kernel`` (MLX >= 0.16) to fuse L2-norm, rotation,
 and codebook search into single GPU dispatches.  Falls back to the
@@ -6,6 +7,7 @@ Python/MLX path transparently when Metal is unavailable.
 
 PolarQuant kernels:  ``metal_quantize``, ``metal_dequantize``
 RotorQuant kernels:  ``metal_rotor_quantize``, ``metal_rotor_dequantize``
+Attention kernels:   ``metal_score_keys``, ``metal_aggregate_values``
 """
 
 from __future__ import annotations
@@ -422,3 +424,183 @@ def metal_rotor_dequantize(
     )
 
     return mx.reshape(out_flat, orig_shape)
+
+
+# ---------------------------------------------------------------------------
+# Fused dequant-attention kernels
+#
+# These kernels keep K and V in compressed (uint8 indices + float16 norms)
+# form and fuse the dequantization into the attention score / aggregation
+# passes.  This halves DRAM bandwidth at 4-bit vs float16 KV storage.
+#
+# Mathematical basis:
+#   PolarQuant encodes: indices[d] = argmin_c |y[d] - c|  where y = R @ x_unit
+#   Dequant: x_hat = norm * R.T @ centroids[indices]
+#
+#   Attention score for a query q and key k:
+#     score = q · x_hat_k
+#           = norm_k * q · (R.T @ centroids[indices_k])
+#           = norm_k * (R @ q) · centroids[indices_k]
+#
+#   If we precompute q_rotated = R @ q (once per decode step), then:
+#     score = norm_k * dot(q_rotated, centroids[indices_k])
+#   — a simple gather-then-dot, no per-key rotation needed.
+#
+#   For the value aggregation:
+#     output = sum_k weights_k * norm_k * R.T @ centroids[v_indices_k]
+#            = R.T @ (sum_k weights_k * norm_k * centroids[v_indices_k])
+#            = R.T @ output_rotated
+#
+#   Kernel computes output_rotated[d] per dimension, then the caller does
+#   a single R.T @ output_rotated to recover the spatial output.
+#
+#   RotorQuant: same math, block-diagonal R (O(D) instead of O(D^2)).
+# ---------------------------------------------------------------------------
+
+_SCORE_KEYS_TEMPLATE = """
+    // One thread per key position k.
+    // scores_out[k] = dot(q_rotated, centroids[k_indices[k,:]]) * k_norms[k]
+    uint k = thread_position_in_grid.x;
+    const uint D = {D};
+
+    float score = 0.0f;
+    uint base = k * D;
+    for (uint d = 0; d < D; d++) {{
+        float q_d = q_rotated[d];
+        uint8_t idx = k_indices[base + d];
+        score += q_d * centroids[idx];
+    }}
+    scores_out[k] = score * (float)k_norms[k];
+"""
+
+_AGGREGATE_VALUES_TEMPLATE = """
+    // One thread per output dimension d (in rotated space).
+    // out_rotated[d] = sum_k weights[k] * v_norms[k] * centroids[v_indices[k,d]]
+    uint d = thread_position_in_grid.x;
+    const uint D = {D};
+    const uint T_kv = t_kv[0];
+
+    float acc = 0.0f;
+    for (uint k = 0; k < T_kv; k++) {{
+        float w = weights[k] * (float)v_norms[k];
+        uint8_t idx = v_indices[k * D + d];
+        acc += w * centroids[idx];
+    }}
+    out_rotated[d] = acc;
+"""
+
+
+@functools.lru_cache(maxsize=32)
+def _get_score_keys_kernel(D: int, n_levels: int):
+    source = _SCORE_KEYS_TEMPLATE.format(D=D)
+    return mx.fast.metal_kernel(
+        name=f"score_keys_{D}_{n_levels}",
+        input_names=["q_rotated", "k_indices", "k_norms", "centroids"],
+        output_names=["scores_out"],
+        source=source,
+    )
+
+
+@functools.lru_cache(maxsize=32)
+def _get_aggregate_values_kernel(D: int, n_levels: int):
+    source = _AGGREGATE_VALUES_TEMPLATE.format(D=D)
+    return mx.fast.metal_kernel(
+        name=f"aggregate_values_{D}_{n_levels}",
+        input_names=["weights", "v_norms", "v_indices", "centroids", "t_kv"],
+        output_names=["out_rotated"],
+        source=source,
+    )
+
+
+def metal_score_keys(
+    q_rotated: mx.array,
+    k_indices: mx.array,
+    k_norms: mx.array,
+    centroids: mx.array,
+) -> mx.array:
+    """Fused gather-dot: score all compressed keys against a pre-rotated query.
+
+    Computes ``scores[k] = dot(q_rotated, centroids[k_indices[k]]) * k_norms[k]``
+    for every key position in a single Metal dispatch.  Avoids materializing
+    the float32 key buffer — reads uint8 + float16 instead.
+
+    Call ``R @ q`` (PolarQuant) or ``block_R @ q`` (RotorQuant) before this
+    function to obtain ``q_rotated``.
+
+    Args:
+        q_rotated: Pre-rotated query, shape ``(D,)``, float32.
+        k_indices: uint8 key cache indices, shape ``(T_kv, D)``.
+        k_norms: float16 key norms, shape ``(T_kv,)`` or ``(T_kv, 1)``.
+        centroids: Lloyd-Max codebook, shape ``(n_levels,)``, float32.
+
+    Returns:
+        Raw attention scores (pre-softmax), shape ``(T_kv,)``, float32.
+    """
+    D = q_rotated.shape[0]
+    n_levels = centroids.shape[0]
+    T_kv = k_indices.shape[0]
+
+    k_indices_flat = mx.reshape(k_indices, (-1,))
+    k_norms_flat = mx.reshape(k_norms, (-1,))
+
+    kernel = _get_score_keys_kernel(D, n_levels)
+    (scores,) = kernel(
+        inputs=[
+            q_rotated.astype(mx.float32),
+            k_indices_flat,
+            k_norms_flat.astype(mx.float16),
+            centroids.astype(mx.float32),
+        ],
+        output_shapes=[(T_kv,)],
+        output_dtypes=[mx.float32],
+        grid=(T_kv, 1, 1),
+        threadgroup=(1, 1, 1),
+    )
+    return scores
+
+
+def metal_aggregate_values(
+    weights: mx.array,
+    v_indices: mx.array,
+    v_norms: mx.array,
+    centroids: mx.array,
+) -> mx.array:
+    """Fused weighted-gather: aggregate compressed values in rotated space.
+
+    Computes ``out_rotated[d] = sum_k weights[k] * v_norms[k] * centroids[v_indices[k,d]]``
+    for all output dimensions simultaneously.  Call ``R.T @ out_rotated``
+    (PolarQuant) or the block-diagonal inverse rotation (RotorQuant) to
+    recover the final spatial output.
+
+    Args:
+        weights: Softmax attention weights, shape ``(T_kv,)``, float32.
+        v_indices: uint8 value cache indices, shape ``(T_kv, D)``.
+        v_norms: float16 value norms, shape ``(T_kv,)`` or ``(T_kv, 1)``.
+        centroids: Lloyd-Max codebook, shape ``(n_levels,)``, float32.
+
+    Returns:
+        Aggregated values in rotated space, shape ``(D,)``, float32.
+    """
+    D = v_indices.shape[-1]
+    T_kv = v_indices.shape[0]
+    n_levels = centroids.shape[0]
+
+    v_indices_flat = mx.reshape(v_indices, (-1,))
+    v_norms_flat = mx.reshape(v_norms, (-1,))
+    t_kv_arr = mx.array([T_kv], dtype=mx.uint32)
+
+    kernel = _get_aggregate_values_kernel(D, n_levels)
+    (out_rotated,) = kernel(
+        inputs=[
+            weights.astype(mx.float32),
+            v_norms_flat.astype(mx.float16),
+            v_indices_flat,
+            centroids.astype(mx.float32),
+            t_kv_arr,
+        ],
+        output_shapes=[(D,)],
+        output_dtypes=[mx.float32],
+        grid=(D, 1, 1),
+        threadgroup=(min(D, 1024), 1, 1),
+    )
+    return out_rotated

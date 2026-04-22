@@ -5,6 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-04-22
+
+### Added — Fused dequant-attention and bit-packing
+
+- **`packing.py`** — `pack(indices, bits)` / `unpack(packed, bits, shape)`:
+  bit-pack Lloyd-Max indices at their actual bit-width instead of wasting
+  8 bits per index in a uint8 container.
+
+  Compression vs uint8 storage:
+  - 2-bit: 4× (4 indices per byte)
+  - 4-bit: 2× (2 indices per byte — standard case)
+  - 3-bit / 6-bit: bit-stream packing (non-byte-aligned)
+
+  All functions are pure NumPy, backend-agnostic, and designed for
+  serialization and DRAM storage.  The hot-path (GPU quantize/dequantize)
+  still operates on uint8 in GPU memory.
+
+- **Fused dequant-attention kernels** (`kernels/__init__.py`):
+  `metal_score_keys` and `metal_aggregate_values` — two new Metal MSL
+  kernels that perform attention over compressed KV caches without
+  ever materializing float32 K or V buffers.
+
+  Mathematical basis:
+  ```
+  score[k] = norm_k * dot(R @ q, centroids[k_indices[k]])
+  output    = R.T @ sum_k(weights[k] * norm_k * centroids[v_indices[k]])
+  ```
+  Prerotating `q` once (O(D²) or O(D) for RotorQuant) makes each key
+  score a simple gather-then-dot with no per-key rotation.
+
+  DRAM bandwidth at 4-bit vs float16 KV: **~4× reduction**
+  (uint8 + float16 norms vs float16 full vectors).
+
+- **`attention_fused.py`** — high-level fused attention API:
+  - `fused_polar_decode_step(q, k_idx, k_norms, v_idx, v_norms, R, centroids, scale)`
+    — single-head decode over PolarQuant-compressed cache.
+  - `fused_rotor_decode_step(...)` — same for RotorQuant; rotation cost O(D).
+  - `batched_fused_polar_decode(queries, ...)` — multi-head / GQA decode.
+
+- **Tests**: 139 packing tests + 14 fused attention tests (total: 760 passing).
+
+### Skipped — entropy coding
+
+Measured empirical entropy of Lloyd-Max indices across all bit-widths
+and head dimensions (both PolarQuant and RotorQuant):
+
+| bits | H (bits) | bound | ratio | EC ceiling |
+|------|----------|-------|-------|------------|
+| 2    | 1.915    | 2     | 95.8% | 4.2%       |
+| 3    | 2.828    | 3     | 94.3% | 5.7%       |
+| 4    | 3.766    | 4     | 94.1% | 5.9%       |
+
+Lloyd-Max at 94% entropy efficiency leaves only 4–6% on the table.
+Entropy coding (ANS, Huffman) is not worth the complexity — skipped.
+LZ/dictionary compression gains nothing because the rotation deliberately
+decorrelates indices, producing near-i.i.d. uniform data.
+
 ## [0.4.1] - 2026-04-21
 
 ### Added — RotorQuantizer: Clifford rotor block-diagonal KV compression
