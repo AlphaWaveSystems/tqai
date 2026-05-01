@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added — CSA + HCA block-pool attention compression (DeepSeek V4)
+
+- **`tqai.csa_hca`** — pure-torch math primitives for the DeepSeek V4
+  interleaved attention design.  Includes mean-pool block compression,
+  query-dependent top-k block selection (CSA), and a combined
+  `csa_hca_attention` that runs a single softmax over the union of selected
+  CSA centroids and aggressively-pooled HCA centroids.
+
+- **`tqai.strategies.csa_hca.CSAHCAStrategy`** — registered as `"csa_hca"`
+  in the pipeline registry.  Compresses a KV tensor into both views and
+  routes both through the configured quantizer; `decompress` either returns
+  the two block-resolution tensors or broadcasts the CSA view back to the
+  original sequence length.
+
+- **`scripts/csa_hca_e2e.py`** — captures Q/K/V from a real Qwen2.5-0.5B
+  forward pass and benchmarks cosine similarity, max-abs error, and
+  effective compression ratio against full SDPA across CSA/HCA settings.
+  Sanity case (`csa_block_size=1`, `top_k=S`, `hca_block_size=S`) recovers
+  full attention to cosine 1.0000.
+
+- **`tests/test_csa_hca.py`** — 28 unit tests covering block pooling,
+  scoring, top-k, GQA gathering, end-to-end attention with hand-calculated
+  values, the degenerate full-attention equivalence, the strategy wrapper,
+  and registry integration.
+
 ## [0.6.0] - 2026-04-22
 
 ### Added — Batched multi-head Metal kernels + end-to-end validation
