@@ -160,75 +160,86 @@ def _unpack_4bit(packed: np.ndarray, n: int) -> np.ndarray:
 
 
 def _pack_bitstream(flat: np.ndarray, bits: int) -> np.ndarray:
-    """General bit-stream packing for non-byte-aligned widths (3, 6 bits)."""
+    """Vectorized bit-stream packing for non-byte-aligned widths (3, 6 bits).
+
+    Strategy: every LCM(bits, 8) bits forms a self-contained block.
+      bits=3 → LCM=24 → 8 indices × 3-bit = 3 bytes per block
+      bits=6 → LCM=24 → 4 indices × 6-bit = 3 bytes per block
+    All full blocks are handled with a single NumPy reduction; the
+    tail (< block_indices elements) is handled with a tiny Python loop.
+    """
     n = len(flat)
     n_bytes = (n * bits + 7) // 8
-    out = np.zeros(n_bytes, dtype=np.uint8)
 
-    # Vectorize using uint64 accumulators: process indices in blocks that
-    # fill an exact number of bytes.
-    # LCM(bits, 8) / bits = indices per block; LCM(bits, 8) / 8 = bytes per block
     lcm = _lcm(bits, 8)
-    block_indices = lcm // bits   # e.g. bits=3 → lcm=24 → 8 indices per block
-    block_bytes = lcm // 8        # e.g. bits=3 → 3 bytes per block
+    block_indices = lcm // bits  # indices per block (8 for 3-bit, 4 for 6-bit)
+    block_bytes = lcm // 8       # bytes per block  (3 for both)
 
-    n_full_blocks = n // block_indices
+    n_full = n // block_indices
     remainder = n % block_indices
 
-    if n_full_blocks > 0:
-        blocks = flat[: n_full_blocks * block_indices].reshape(n_full_blocks, block_indices)
-        for b_idx in range(n_full_blocks):
-            acc: int = 0
-            for i in range(block_indices):
-                acc |= int(blocks[b_idx, i]) << (i * bits)
-            base = b_idx * block_bytes
-            for j in range(block_bytes):
-                out[base + j] = (acc >> (j * 8)) & 0xFF
+    # Per-position bit shifts within a block.
+    # All accumulators fit in uint32: max value = 2^LCM(bits,8) - 1 ≤ 2^24 - 1.
+    idx_shifts = (np.arange(block_indices, dtype=np.uint32) * bits)
+    byte_shifts = (np.arange(block_bytes, dtype=np.uint32) * 8)
 
-    # Handle remainder indices
+    out = np.zeros(n_bytes, dtype=np.uint8)
+
+    if n_full > 0:
+        blocks = flat[: n_full * block_indices].reshape(n_full, block_indices).astype(np.uint32)
+        acc = (blocks << idx_shifts).sum(axis=1, dtype=np.uint32)          # (n_full,)
+        bytes_2d = ((acc[:, None] >> byte_shifts) & 0xFF).astype(np.uint8)  # (n_full, block_bytes)
+        out[: n_full * block_bytes] = bytes_2d.ravel()
+
     if remainder:
-        acc = 0
+        acc_r = 0
+        base_idx = n_full * block_indices
         for i in range(remainder):
-            acc |= int(flat[n_full_blocks * block_indices + i]) << (i * bits)
-        base = n_full_blocks * block_bytes
-        remaining_bits = remainder * bits
-        remaining_bytes = (remaining_bits + 7) // 8
-        for j in range(remaining_bytes):
-            out[base + j] = (acc >> (j * 8)) & 0xFF
+            acc_r |= int(flat[base_idx + i]) << (i * bits)
+        base_out = n_full * block_bytes
+        rem_bytes = (remainder * bits + 7) // 8
+        for j in range(rem_bytes):
+            out[base_out + j] = (acc_r >> (j * 8)) & 0xFF
 
     return out
 
 
 def _unpack_bitstream(packed: np.ndarray, bits: int, n: int) -> np.ndarray:
-    """General bit-stream unpacking for non-byte-aligned widths (3, 6 bits)."""
-    out = np.zeros(n, dtype=np.uint8)
-    mask = (1 << bits) - 1
+    """Vectorized bit-stream unpacking for non-byte-aligned widths (3, 6 bits).
 
+    Inverse of _pack_bitstream: reassemble uint32 accumulators per block via
+    NumPy reduction, then extract each index with a right-shift + mask.
+    """
     lcm = _lcm(bits, 8)
     block_indices = lcm // bits
     block_bytes = lcm // 8
 
-    n_full_blocks = n // block_indices
+    n_full = n // block_indices
     remainder = n % block_indices
+    mask = np.uint32((1 << bits) - 1)
 
-    if n_full_blocks > 0:
-        for b_idx in range(n_full_blocks):
-            base = b_idx * block_bytes
-            acc = 0
-            for j in range(block_bytes):
-                acc |= int(packed[base + j]) << (j * 8)
-            for i in range(block_indices):
-                out[b_idx * block_indices + i] = (acc >> (i * bits)) & mask
+    idx_shifts = (np.arange(block_indices, dtype=np.uint32) * bits)
+    byte_shifts = (np.arange(block_bytes, dtype=np.uint32) * 8)
+
+    out = np.zeros(n, dtype=np.uint8)
+
+    if n_full > 0:
+        pb = packed[: n_full * block_bytes].reshape(n_full, block_bytes).astype(np.uint32)
+        acc = (pb << byte_shifts).sum(axis=1, dtype=np.uint32)              # (n_full,)
+        indices_2d = ((acc[:, None] >> idx_shifts) & mask).astype(np.uint8)  # (n_full, block_indices)
+        out[: n_full * block_indices] = indices_2d.ravel()
 
     if remainder:
-        base = n_full_blocks * block_bytes
-        remaining_bytes = ((remainder * bits) + 7) // 8
-        acc = 0
-        for j in range(remaining_bytes):
-            if base + j < len(packed):
-                acc |= int(packed[base + j]) << (j * 8)
+        base_in = n_full * block_bytes
+        rem_bytes = (remainder * bits + 7) // 8
+        acc_r = 0
+        for j in range(rem_bytes):
+            if base_in + j < len(packed):
+                acc_r |= int(packed[base_in + j]) << (j * 8)
+        base_out = n_full * block_indices
+        mask_int = (1 << bits) - 1
         for i in range(remainder):
-            out[n_full_blocks * block_indices + i] = (acc >> (i * bits)) & mask
+            out[base_out + i] = (acc_r >> (i * bits)) & mask_int
 
     return out
 
