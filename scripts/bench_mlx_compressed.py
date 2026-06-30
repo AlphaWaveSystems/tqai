@@ -79,12 +79,14 @@ def greedy_decode(model, tok, prompt: str, n_new: int) -> tuple[str, list[int], 
 
 def measure(label: str, model, tok, prompt: str, n_new: int) -> RunResult:
     proc = psutil.Process(os.getpid())
-    mx.metal.reset_peak_memory()
+    _reset_peak = getattr(mx, "reset_peak_memory", None) or mx.metal.reset_peak_memory
+    _get_peak = getattr(mx, "get_peak_memory", None) or mx.metal.get_peak_memory
+    _reset_peak()
     rss_before = proc.memory_info().rss / (1024 * 1024)
 
     text, tokens, elapsed = greedy_decode(model, tok, prompt, n_new)
 
-    mlx_peak = mx.metal.get_peak_memory() / (1024 * 1024)
+    mlx_peak = _get_peak() / (1024 * 1024)
     rss_after = proc.memory_info().rss / (1024 * 1024)
     return RunResult(
         label=label,
