@@ -19,7 +19,7 @@ try:
     # security hooks that look for the builtin eval() function.
     _mlx_eval = mx.eval
 
-    from tqai.kernels import metal_available, metal_aggregate_values, metal_score_keys
+    from tqai.kernels import metal_aggregate_values, metal_available, metal_score_keys
 
     HAS_METAL = metal_available()
 except ImportError:
@@ -570,8 +570,8 @@ def test_batched_v2_gqa(mlx_ops):
 def test_batched_rotor_v2_matches_loop(mlx_ops):
     """batched_fused_rotor_decode_v2 output matches per-head rotor decode."""
     from tqai.attention_fused import (
-        fused_rotor_decode_step,
         batched_fused_rotor_decode_v2,
+        fused_rotor_decode_step,
     )
 
     B, n_q, D, bits = 1, 4, 66, 4  # 66 = 22*3, all full groups

@@ -25,7 +25,6 @@ from tqai.csa_hca import (
 from tqai.pipeline.base import ScoredEntry
 from tqai.quantizer import PolarQuantizer
 
-
 # ---------------------------------------------------------------------------
 # Math primitives
 # ---------------------------------------------------------------------------
