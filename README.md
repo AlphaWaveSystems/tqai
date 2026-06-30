@@ -395,6 +395,44 @@ Standalone HTML: [`reports/benchmark_report.html`](reports/benchmark_report.html
 
 ---
 
+## LMCache Integration (Distributed KV-Cache Compression)
+
+`lmcache-turbo-quant-serde` plugs tqai's `PolarQuantizer` into
+[LMCache v1](https://github.com/LMCache/LMCache) as a drop-in serde
+(serializer/deserializer). KV blocks evicted to L2 storage (disk, Redis,
+remote DRAM) are compressed to ~26% of their fp16 size with Δppl = 0.00.
+
+```bash
+pip install -e integrations/lmcache   # until published to PyPI
+```
+
+```python
+import lmcache_turbo_quant_serde
+
+# Register once at startup — before LMCache initialises its engine
+lmcache_turbo_quant_serde.register()
+```
+
+```yaml
+# lmcache_config.yaml
+remote_serde:
+  type: tqai
+  kwargs:
+    head_dim: 128  # match your model's KV head dimension
+    bits: 4        # 4 → Δppl=0.00; 3 → ≈0.00; 2 → slight quality loss
+```
+
+| bits | Storage vs fp16 | Cosine similarity | Δppl |
+|------|----------------|-------------------|------|
+| 4 | 25.8% | 0.9954 | **0.00** |
+| 3 | 19.5% | 0.9831 | ≈ 0.00 |
+| 2 | 13.3% | 0.9405 | < 0.05 |
+
+Full documentation, wire format spec, benchmark table, and roadmap:
+[`integrations/lmcache/README.md`](integrations/lmcache/README.md)
+
+---
+
 ## Diffusers Video Pipelines (WAN 2.2, LTX-2)
 
 ```python
