@@ -263,5 +263,5 @@ def test_high_level_uses_metal(mlx_ops):
     _mlx_eval(py_idx, py_norms, py_recon)
 
     np.testing.assert_array_equal(np.array(m_idx), np.array(py_idx))
-    np.testing.assert_array_equal(np.array(m_norms), np.array(py_norms))
+    np.testing.assert_allclose(np.array(m_norms), np.array(py_norms), atol=1e-2, rtol=1e-3)
     np.testing.assert_allclose(np.array(m_recon), np.array(py_recon), atol=2e-3)

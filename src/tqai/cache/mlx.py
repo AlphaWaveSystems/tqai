@@ -386,7 +386,6 @@ class TurboQuantMLXCache:
         Returns:
             Attention output ``[B, n_q_heads, T_q, D]`` float32.
         """
-        import mlx.core as mx
 
         B, n_q_heads, T_q, D = queries.shape
 
@@ -420,6 +419,7 @@ class TurboQuantMLXCache:
     ) -> Any:
         """Per-head fused attention loop (fallback for T_q > 1 or B > 1)."""
         import mlx.core as mx
+
         from tqai.kernels import metal_aggregate_values, metal_score_keys
 
         B, n_q_heads, T_q, D = queries.shape

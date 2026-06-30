@@ -222,8 +222,8 @@ def perplexity_comparison(model, tokenizer) -> dict:
     """Compare perplexity across strategies."""
     _header("PART B — Perplexity Comparison (autoregressive)")
     print(f"  Text: {len(EVAL_TEXT)} chars, truncated to 256 tokens")
-    print(f"  Baseline uses single forward pass (no cache).")
-    print(f"  incremental/compressed use cache for decode path.\n")
+    print("  Baseline uses single forward pass (no cache).")
+    print("  incremental/compressed use cache for decode path.\n")
 
     results = {}
     baseline_ppl = None

@@ -10,6 +10,9 @@ Verifies:
 
 from __future__ import annotations
 
+import os
+import sys
+
 import numpy as np
 import pytest
 
@@ -25,7 +28,11 @@ try:
 except ImportError:
     HAS_METAL = False
 
-pytestmark = pytest.mark.skipif(not HAS_METAL, reason="Metal kernels unavailable")
+_SKIP_ON_CI = sys.platform == "darwin" and "CI" in os.environ
+pytestmark = pytest.mark.skipif(
+    not HAS_METAL or _SKIP_ON_CI,
+    reason="Metal kernels unavailable or headless macOS CI (Metal runtime abort)",
+)
 
 
 # ---------------------------------------------------------------------------

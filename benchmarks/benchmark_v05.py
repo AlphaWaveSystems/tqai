@@ -644,13 +644,13 @@ def bench_capacity(results: dict) -> None:
         }
 
     print()
-    print(f"  24 GB device, Llama-3-8B (weights≈16 GB):")
+    print("  24 GB device, Llama-3-8B (weights≈16 GB):")
     print(f"  fp16 KV cache max context:  {max_fp16:,} tokens")
     print(f"  v0.6 KV cache max context:  {max_v06:,} tokens  "
           f"({max_v06 / max_fp16:.1f}x longer)")
     print(f"  At contexts beyond {max_fp16:,}, fp16 cannot run at all — v0.6 is the")
-    print(f"  only option.  The ~1.7x latency overhead is the cost of reaching those")
-    print(f"  context lengths on constrained hardware.\n")
+    print("  only option.  The ~1.7x latency overhead is the cost of reaching those")
+    print("  context lengths on constrained hardware.\n")
 
 
 # ---------------------------------------------------------------------------

@@ -127,8 +127,12 @@ def test_quality_parity_with_polar(d, ops):
     x_hat_r = rq.dequantize(idx_r, n_r)
 
     x_np = ops.to_numpy(x).reshape(-1, d).astype(np.float64)
-    cos_p = float(np.mean(_cosine_sim(x_np, ops.to_numpy(x_hat_p).reshape(-1, d).astype(np.float64))))
-    cos_r = float(np.mean(_cosine_sim(x_np, ops.to_numpy(x_hat_r).reshape(-1, d).astype(np.float64))))
+    cos_p = float(np.mean(
+        _cosine_sim(x_np, ops.to_numpy(x_hat_p).reshape(-1, d).astype(np.float64))
+    ))
+    cos_r = float(np.mean(
+        _cosine_sim(x_np, ops.to_numpy(x_hat_r).reshape(-1, d).astype(np.float64))
+    ))
 
     # Allow up to 2% difference — both should be near 0.995
     assert abs(cos_p - cos_r) < 0.02, (
@@ -240,7 +244,6 @@ def test_rotation_matrices_are_orthogonal(ops):
 def test_metal_activated_on_mlx():
     """RotorQuantizer should activate Metal path when MLX + Metal are present."""
     try:
-        import mlx.core as mx
         from tqai.backend import get_backend
         from tqai.kernels import metal_available
     except ImportError:
