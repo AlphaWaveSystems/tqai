@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-06-30
+
+### Fixed — MLX compressed cache throughput regression
+
+- **Eliminated O(T) dummy tensor** — on every decode step the compressed
+  strategy was allocating `mx.zeros((1, H, T, D))` (growing with sequence
+  length) and assigning it to `self.keys` / `self.values`, which blocked
+  MLX's garbage collector.  Peak memory doubled (1028 → 2143 MB) as dead
+  tensors accumulated.
+
+- **Replaced custom Metal kernel with native SDPA** — `_patch.py` was
+  automatically installing `patch_fused_attention` for the compressed
+  strategy, routing all decode steps through `batched_fused_polar_decode_v2`.
+  This kernel has higher per-dispatch overhead than Apple's fused
+  `mx.fast.scaled_dot_product_attention` at short sequence lengths.
+  The compressed strategy now falls through to `_reconstruct_compressed` +
+  native SDPA by default.  The Metal kernel path remains as an explicit
+  opt-in via `patch_fused_attention(model, cache_list)` for long-context
+  scenarios where re-materialising float16 K/V becomes expensive.
+
+  | Metric | Before | After |
+  |--------|--------|-------|
+  | Throughput (8-bit) | 62 tok/s (3.3× slower than baseline) | 225 tok/s (20% slower) |
+  | Throughput (4-bit) | 73 tok/s (2.8× slower) | 238 tok/s (15% slower) |
+  | Peak memory | 2143 MB | 1025 MB (matches baseline) |
+
+- **Benchmark deprecation warning** — `scripts/bench_mlx_compressed.py`
+  updated from `mx.metal.reset_peak_memory` / `mx.metal.get_peak_memory`
+  to the current `mx.reset_peak_memory` / `mx.get_peak_memory` API with
+  a backward-compatible fallback.
+
 ### Added — CSA + HCA block-pool attention compression (DeepSeek V4)
 
 - **`tqai.csa_hca`** — pure-torch math primitives for the DeepSeek V4
