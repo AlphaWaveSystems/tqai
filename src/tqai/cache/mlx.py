@@ -89,8 +89,8 @@ class TurboQuantMLXCache:
         self._v_norms: Any | None = None
         # When True, update_and_fetch skips assembling a float32 K/V buffer during
         # decode — the patched SDPA calls compute_fused_attention instead.
-        # Self-activates for compressed strategy; also set by patch_fused_attention.
-        self._skip_assemble: bool = (self._strategy == "compressed")
+        # Activated explicitly by patch_fused_attention (opt-in Metal kernel path).
+        self._skip_assemble: bool = False
 
         self.offset: int = 0
         self._input_dtype = None
@@ -158,16 +158,14 @@ class TurboQuantMLXCache:
 
         self.offset += new_seq
 
-        # For the compressed + fused path: the patched SDPA calls
-        # compute_fused_attention directly, so we skip assembling float32 K/V.
-        # During prefill (new_seq > 1) or without the patch, fall through to
-        # the normal assembly path so the model gets valid float32 tensors.
-        if self._strategy == "compressed" and self._skip_assemble and new_seq == 1:
-            # Return zero-shaped placeholder — patched SDPA ignores it.
-            dummy = mx.zeros((1, self.n_kv_heads, self.offset, self.head_dim))
-            self.keys = dummy
-            self.values = dummy
-            return dummy, dummy
+        # When patch_fused_attention has been installed (opt-in Metal kernel path),
+        # skip materialising float32 K/V — the patched SDPA calls
+        # compute_fused_attention directly.
+        if self._skip_assemble and new_seq == 1 and self._strategy == "compressed":
+            # Tiny placeholder — fused_sdpa_wrapper ignores keys/values entirely.
+            self.keys = keys
+            self.values = values
+            return keys, values
 
         # Assemble full history
         all_keys = self._assemble(is_key=True, mx=mx)
@@ -315,9 +313,9 @@ class TurboQuantMLXCache:
     def _update_compressed(self, keys, values, mx):
         """Quantize new tokens, append to compressed (uint8+fp16) buffer.
 
-        Never stores a float32 history buffer.  The full K/V history is
-        reconstructed on demand by ``_reconstruct_compressed`` (fallback)
-        or consumed directly by ``compute_fused_attention`` (fast path).
+        The full K/V history is reconstructed by ``_reconstruct_compressed``
+        on every decode step (default) or by ``compute_fused_attention`` when
+        ``patch_fused_attention`` has been installed (opt-in Metal kernel path).
         """
         k_idx, k_nrm = self._k_quantizer.quantize(keys)   # uint8, fp16
         v_idx, v_nrm = self._v_quantizer.quantize(values)

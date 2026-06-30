@@ -223,7 +223,7 @@ def test_fused_attention_with_sinks():
 
 
 def test_skip_assemble_avoids_float32_buffer():
-    """When _skip_assemble=True, single-token update returns dummy zeros."""
+    """When _skip_assemble=True (Metal kernel opt-in), decode returns the raw 1-token key."""
     D, H = 64, 2
     cache = _make_cache("compressed", head_dim=D, n_kv_heads=H)
     cache._skip_assemble = True  # simulates patch_fused_attention
@@ -232,8 +232,9 @@ def test_skip_assemble_avoids_float32_buffer():
     k_ret, v_ret = cache.update_and_fetch(k, v)
     _mlx_eval(k_ret, v_ret)
 
+    # Returns the single new-token key/value (shape 1×H×1×D, non-zero)
     assert k_ret.shape == (1, H, 1, D)
-    assert float(mx.sum(mx.abs(k_ret))) == pytest.approx(0.0, abs=1e-6)
+    assert float(mx.sum(mx.abs(k_ret))) > 0.0
 
 
 def test_skip_assemble_false_returns_real_data():
@@ -258,15 +259,16 @@ class _MockModel:
 
 
 def test_patch_fused_attention_activates_skip_assemble():
-    """Compressed caches self-activate _skip_assemble; patch_fused_attention patches SDPA."""
+    """patch_fused_attention sets _skip_assemble on compressed caches and patches SDPA."""
     from tqai.attention import patch_fused_attention, unpatch_fused_attention
 
     cache = _make_cache("compressed", head_dim=64, n_kv_heads=2)
-    # Compressed caches self-activate _skip_assemble in __init__
-    assert cache._skip_assemble
+    # Default: _skip_assemble is False (uses _reconstruct_compressed + native SDPA)
+    assert not cache._skip_assemble
 
     model = _MockModel()
     patch_fused_attention(model, [cache])
+    # After explicit opt-in: Metal kernel path is active
     assert cache._skip_assemble
     assert hasattr(model, "_tqai_fused_original_sdpa")
 
