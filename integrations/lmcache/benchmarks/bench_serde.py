@@ -255,8 +255,7 @@ def main() -> None:
 
     print("\n\n## tqai × LMCache Serde Benchmark\n")
     print("> Platform: CPU (torch bfloat16) — run on GPU for production numbers")
-    print("> Note: bits=3 uses a Python-level bitstream packer (tqai._pack_bitstream).")
-    print("> Vectorizing it with NumPy would bring 3-bit perf in line with 4-bit.\n")
+    print("> bits=3/6 use a vectorized LCM-block bitstream packer (tqai v0.6+).\n")
     print(md)
     print()
 
