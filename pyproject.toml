@@ -71,6 +71,7 @@ select = ["E", "F", "I", "W"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/tqai/cli.py" = ["E501"]
+"src/tqai/packing.py" = ["E501"]
 "tests/test_e2e_*.py" = ["E501"]
 "tests/test_convert.py" = ["E501"]
 "tests/test_cfg_sharing.py" = ["F841"]   # _ = call(...) intentional
