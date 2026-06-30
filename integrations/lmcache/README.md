@@ -13,8 +13,8 @@ required.
 ## Quick start
 
 ```bash
-pip install tqai
-pip install -e integrations/lmcache   # until published to PyPI
+pip install lmcache-turbo-quant-serde          # includes tqai automatically
+pip install lmcache-turbo-quant-serde[lmcache] # + LMCache v1 engine
 ```
 
 ```python
