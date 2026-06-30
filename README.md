@@ -403,7 +403,8 @@ Standalone HTML: [`reports/benchmark_report.html`](reports/benchmark_report.html
 remote DRAM) are compressed to ~26% of their fp16 size with Δppl = 0.00.
 
 ```bash
-pip install -e integrations/lmcache   # until published to PyPI
+pip install lmcache-turbo-quant-serde          # includes tqai automatically
+pip install lmcache-turbo-quant-serde[lmcache] # + LMCache v1 engine
 ```
 
 ```python
