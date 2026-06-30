@@ -134,17 +134,20 @@ def main():
 
     model, tok = load(args.model)
     baseline = measure("baseline", model, tok, prompt, args.gen_tokens)
-    del model; gc.collect()
+    del model
+    gc.collect()
 
     model, tok = load(args.model)
     tqai.patch(model, bits_k=8, bits_v=8, backend="mlx", cache_strategy="compressed")
     tqai_8 = measure("tqai 8/8 (compressed)", model, tok, prompt, args.gen_tokens)
-    del model; gc.collect()
+    del model
+    gc.collect()
 
     model, tok = load(args.model)
     tqai.patch(model, bits_k=4, bits_v=4, backend="mlx", cache_strategy="compressed")
     tqai_4 = measure("tqai 4/4 (compressed)", model, tok, prompt, args.gen_tokens)
-    del model; gc.collect()
+    del model
+    gc.collect()
 
     rows = [baseline, tqai_8, tqai_4]
     print(f"{'config':<24} {'top1_v_base':>11} {'dec_s':>7} {'dec_tps':>8} "

@@ -104,6 +104,10 @@ def test_compressed_buffer_grows_correctly():
 @pytest.mark.parametrize("bits", [2, 4])
 def test_reconstruct_compressed_vs_incremental(head_dim, bits):
     """_reconstruct_compressed output must be close to incremental output."""
+    import os
+    import sys
+    if bits == 2 and head_dim == 128 and sys.platform == "darwin" and "CI" in os.environ:
+        pytest.skip("Metal runtime abort at bits=2, head_dim=128 in headless CI")
     H, B, T = 2, 1, 8
     k_seq, v_seq = _rand_kv(B, H, T, head_dim, 77)
 

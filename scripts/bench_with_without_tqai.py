@@ -99,8 +99,6 @@ def measure(
 ) -> RunResult:
     enc = tok(PASSAGE, return_tensors="pt")
     input_ids = enc.input_ids
-    n_tokens = input_ids.shape[1]
-
     rss_before = rss_mb()
     rss_peak = rss_before
 
@@ -190,7 +188,8 @@ def main():
         baseline_top1=None,
         new_tokens=args.gen_tokens,
     )
-    del model; gc.collect()
+    del model
+    gc.collect()
 
     # ---- tqai 8-bit ----
     print("Run 2/3  tqai 8/8 ...")
@@ -207,7 +206,8 @@ def main():
         baseline_top1=baseline_top1,
         new_tokens=args.gen_tokens,
     )
-    del model; gc.collect()
+    del model
+    gc.collect()
 
     # ---- tqai 4-bit ----
     print("Run 3/3  tqai 4/4 ...")
@@ -221,7 +221,8 @@ def main():
         baseline_top1=baseline_top1,
         new_tokens=args.gen_tokens,
     )
-    del model; gc.collect()
+    del model
+    gc.collect()
 
     # ---- Report ----
     rows = [baseline, r_tqai8, r_tqai4]

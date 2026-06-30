@@ -35,7 +35,6 @@ from typing import Any
 
 import torch
 
-
 # ---------------------------------------------------------------------------
 # Block pooling
 # ---------------------------------------------------------------------------
@@ -239,7 +238,6 @@ def csa_hca_attention(
     idx = csa_top_k(csa_scores, csa_top_k_blocks)  # (B, H_q, T_q, k_eff)
     k_eff = idx.shape[-1]
 
-    k_csa_sel = gather_blocks(k_csa, idx)  # (B, H_q, T_q, k_eff, D)
     v_csa_sel = gather_blocks(v_csa, idx)
 
     # CSA scores at selected positions (already computed; reuse for fairness)

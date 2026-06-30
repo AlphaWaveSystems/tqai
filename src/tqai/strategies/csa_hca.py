@@ -157,8 +157,6 @@ def _broadcast_blocks(blocks: torch.Tensor, block_size: int, target_len: int) ->
     Returns:
         ``(..., target_len, D)`` reconstruction.
     """
-    N = blocks.shape[-2]
-    expected_full = N * block_size
     # Trailing partial block (if any) replicates to fill the remainder.
     repeated = blocks.repeat_interleave(block_size, dim=-2)  # (..., N * block_size, D)
     if repeated.shape[-2] >= target_len:
